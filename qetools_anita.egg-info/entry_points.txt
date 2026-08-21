@@ -1,0 +1,6 @@
+[console_scripts]
+qecheck = qetools.cli:check
+qehistory = qetools.cli:history
+qerelax = qetools.cli:relax
+qescf = qetools.cli:scf
+qetools = qetools.cli:main

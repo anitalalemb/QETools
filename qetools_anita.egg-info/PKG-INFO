@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: qetools-anita
+Version: 0.2.0
+Summary: Research-oriented Quantum ESPRESSO analysis helpers for NERSC workflows
+Requires-Python: >=3.9

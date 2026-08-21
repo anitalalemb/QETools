@@ -1,0 +1,13 @@
+Program PWSCF v.7.5
+number of atoms/cell = 100
+number of electrons = 800.00
+number of Kohn-Sham states= 480
+number of k points= 4
+iteration # 1
+estimated scf accuracy < 1.0E-03 Ry
+total energy = -100.0 Ry
+iteration # 2
+estimated scf accuracy < 1.0E-08 Ry
+total energy = -100.1 Ry
+convergence has been achieved in 2 iterations
+JOB DONE.
