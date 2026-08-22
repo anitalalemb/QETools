@@ -95,6 +95,18 @@ def trend(vals):
 # ============================================================
 
 def parse_qe_input_settings(text):
+    """
+    Parse common Quantum ESPRESSO input variables.
+
+    Handles:
+      key = 'quoted/string/value'
+      key = "quoted/string/value"
+      key = unquoted_value
+
+    In particular, absolute paths such as
+    /pscratch/... are preserved rather than being truncated at '/'.
+    """
+
     keys = [
         "calculation",
         "restart_mode",
@@ -124,20 +136,30 @@ def parse_qe_input_settings(text):
     out = {}
 
     for key in keys:
-        m = re.search(
-            rf"(?im)^\s*{re.escape(key)}\s*=\s*([^,\n/]+)",
-            text,
+        pattern = (
+            rf"(?im)^\s*{re.escape(key)}\s*=\s*"
+            rf"(?:'([^']*)'|\"([^\"]*)\"|([^,\n/]+))"
         )
 
-        if m:
-            out[key] = m.group(1).strip().strip("'\"")
+        m = re.search(pattern, text)
+
+        if not m:
+            continue
+
+        value = next(
+            (
+                g
+                for g in m.groups()
+                if g is not None
+            ),
+            None,
+        )
+
+        if value is not None:
+            out[key] = value.strip()
 
     return out
 
-
-# ============================================================
-# QE OUTPUT CORE PARSING
-# ============================================================
 
 def output_core(text):
     iters = []
@@ -211,15 +233,17 @@ def output_core(text):
 
 def classify_output(path, text=None):
     """
-    Classify a QE output without trusting the filename alone.
+    Classify a Quantum ESPRESSO output using physical/output evidence first.
 
-    Returns:
-        SCF
-        RELAX
-        VC-RELAX
-        NSCF
-        BANDS
-        UNKNOWN
+    Priority:
+      1. Explicit relaxation / variable-cell evidence in QE output
+      2. Strong NSCF / bands filename evidence
+      3. Standard PWSCF SCF evidence
+      4. Conservative filename fallback
+      5. UNKNOWN
+
+    Parent-directory names are never used for classification.
+    Generic words such as "relaxed" must not turn an SCF into RELAX.
     """
 
     p = Path(path)
@@ -233,32 +257,48 @@ def classify_output(path, text=None):
     name = p.name.lower()
     low = text.lower()
 
-    # Strongest evidence first
-    if (
+    # --------------------------------------------------------
+    # Strong QE relaxation evidence
+    # --------------------------------------------------------
+
+    has_bfgs = (
         "bfgs geometry optimization" in low
         or "end of bfgs geometry optimization" in low
         or "number of bfgs steps" in low
-    ):
-        if (
-            "vc-relax" in name
-            or "variable cell" in low
-            or "cell_parameters" in low and "new unit-cell volume" in low
-        ):
+        or "bfgs converged" in low
+    )
+
+    if has_bfgs:
+        has_vc_evidence = (
+            "variable cell" in low
+            or (
+                "cell_parameters" in low
+                and "new unit-cell volume" in low
+            )
+        )
+
+        if has_vc_evidence:
             return "VC-RELAX"
 
         return "RELAX"
 
-    # Filename clues for calculations whose type is often not printed
-    if "nscf" in name:
+    # --------------------------------------------------------
+    # Explicit NSCF / bands filename evidence
+    # --------------------------------------------------------
+
+    if re.search(r"(^|[_\-.])nscf([_\-.]|$)", name):
         return "NSCF"
 
-    if "bands" in name or "band_" in name:
+    if (
+        re.search(r"(^|[_\-.])bands?([_\-.]|$)", name)
+        or name.startswith("bands")
+    ):
         return "BANDS"
 
-    if "relax" in name or "-rx-" in name or "_rx_" in name:
-        return "RELAX"
+    # --------------------------------------------------------
+    # Standard electronic PWSCF evidence
+    # --------------------------------------------------------
 
-    # Standard PWSCF electronic SCF output
     if (
         "program pwscf" in low
         and (
@@ -268,6 +308,22 @@ def classify_output(path, text=None):
         )
     ):
         return "SCF"
+
+    # --------------------------------------------------------
+    # Conservative filename fallback
+    # --------------------------------------------------------
+    # Only accept explicit calculation-style relaxation tokens.
+    # Do NOT match "relaxed", "pre_relaxed", "post_relaxed", etc.
+
+    if (
+        re.search(r"(^|[_\-.])relax([_\-.]|$)", name)
+        or re.search(r"(^|[_\-.])vc-relax([_\-.]|$)", name)
+        or re.search(r"(^|[_\-.])rx([_\-.]|$)", name)
+    ):
+        if "vc-relax" in name:
+            return "VC-RELAX"
+
+        return "RELAX"
 
     return "UNKNOWN"
 
@@ -2498,101 +2554,1535 @@ def compare(a=None, b=None):
 # QECHECK
 # ============================================================
 
+
 def check(path=None):
+    """
+    Research-grade Quantum ESPRESSO calculation-integrity checker.
+
+    Usage:
+        qecheck
+        qecheck .
+        qecheck INPUT.in
+        qecheck DIRECTORY
+        qecheck --all
+        qecheck --help
+
+    The checker validates input syntax/consistency, pseudopotentials,
+    save/restart state, corresponding QE outputs and Slurm launch scripts.
+    """
+
     args = sys.argv[1:]
 
     if path is None:
-        path = args[0] if args else "."
+        path = "."
 
-    p = Path(path)
+    show_all = False
 
-    print("=" * 80)
-    print("QECHECK — BASIC DIRECTORY INTEGRITY")
-    print("=" * 80)
+    if args:
+        if args[0] in ("-h", "--help"):
+            print("""
+Usage:
+  qecheck
+  qecheck .
+  qecheck INPUT.in
+  qecheck DIRECTORY
+  qecheck --all
+  qecheck --all DIRECTORY
 
-    print(
-        f"Path: {p.resolve()}"
-    )
+Default:
+  Inspect QE inputs in the current directory and perform research-oriented
+  consistency checks.
 
-    if not p.is_dir():
+Explicit input:
+  Inspect exactly one Quantum ESPRESSO input file.
+
+--all:
+  Show additional detailed evidence for every inspected input.
+""".strip())
+            return
+
+        if args[0] == "--all":
+            show_all = True
+            path = args[1] if len(args) > 1 else "."
+        else:
+            path = args[0]
+
+    target = Path(path)
+
+    if not target.exists():
         raise SystemExit(
-            "qecheck currently expects a directory."
+            f"No readable file or directory found for: {path}"
         )
 
-    ins = list(
-        p.glob("*.in")
-    )
+    if target.is_file():
+        if target.suffix.lower() != ".in":
+            raise SystemExit(
+                "qecheck explicit-file mode currently expects a QE .in file."
+            )
+        inputs = [target]
+        base_dir = target.parent
 
-    outs = list(
-        p.glob("*.out")
-    )
+    else:
+        base_dir = target
+        inputs = sorted(
+            f for f in target.glob("*.in")
+            if f.is_file()
+        )
 
-    errs = list(
-        p.glob("*.err")
-    )
+    if not inputs:
+        raise SystemExit(
+            f"No Quantum ESPRESSO .in files found in: {base_dir.resolve()}"
+        )
 
+    # --------------------------------------------------------
+    # HELPERS LOCAL TO QECHECK
+    # --------------------------------------------------------
+
+    def clean_value(v):
+        if v is None:
+            return None
+        return str(v).strip().strip("'\"")
+
+    def parse_bool(v):
+        if v is None:
+            return None
+        s = clean_value(v).lower()
+        if s in (".true.", "true", "t"):
+            return True
+        if s in (".false.", "false", "f"):
+            return False
+        return None
+
+    def resolve_from_input(value, input_file):
+        """
+        Resolve QE paths relative to the directory containing the input.
+        Absolute paths are preserved.
+        """
+        if not value:
+            return None
+
+        raw = Path(clean_value(value)).expanduser()
+
+        if raw.is_absolute():
+            return raw
+
+        return (input_file.parent / raw).resolve()
+
+    def parse_atomic_species(text):
+        """
+        Return [(symbol, mass, pseudo_filename), ...].
+        """
+        lines = text.splitlines()
+        out = []
+
+        for i, line in enumerate(lines):
+            if re.match(
+                r"^\s*ATOMIC_SPECIES\b",
+                line,
+                re.I,
+            ):
+                j = i + 1
+
+                while j < len(lines):
+                    s = lines[j].strip()
+
+                    if not s:
+                        j += 1
+                        continue
+
+                    if re.match(
+                        r"^(ATOMIC_POSITIONS|K_POINTS|CELL_PARAMETERS|"
+                        r"ATOMIC_FORCES|CONSTRAINTS|OCCUPATIONS|"
+                        r"HUBBARD|SOLVENTS)\b",
+                        s,
+                        re.I,
+                    ):
+                        break
+
+                    parts = s.split()
+
+                    if len(parts) >= 3:
+                        try:
+                            float(parts[1].replace("D", "E").replace("d", "e"))
+                            out.append(
+                                (parts[0], parts[1], parts[2])
+                            )
+                        except Exception:
+                            break
+                    else:
+                        break
+
+                    j += 1
+
+                break
+
+        return out
+
+    def count_atomic_positions(text):
+        lines = text.splitlines()
+
+        for i, line in enumerate(lines):
+            if re.match(
+                r"^\s*ATOMIC_POSITIONS\b",
+                line,
+                re.I,
+            ):
+                n = 0
+                j = i + 1
+
+                while j < len(lines):
+                    s = lines[j].strip()
+
+                    if not s:
+                        j += 1
+                        continue
+
+                    if re.match(
+                        r"^(K_POINTS|CELL_PARAMETERS|ATOMIC_SPECIES|"
+                        r"ATOMIC_FORCES|CONSTRAINTS|OCCUPATIONS|"
+                        r"HUBBARD|SOLVENTS|&)",
+                        s,
+                        re.I,
+                    ):
+                        break
+
+                    parts = s.split()
+
+                    if len(parts) < 4:
+                        break
+
+                    try:
+                        float(parts[1].replace("D", "E").replace("d", "e"))
+                        float(parts[2].replace("D", "E").replace("d", "e"))
+                        float(parts[3].replace("D", "E").replace("d", "e"))
+                        n += 1
+                    except Exception:
+                        break
+
+                    j += 1
+
+                return n
+
+        return None
+
+    def parse_kpoints(text):
+        lines = text.splitlines()
+
+        for i, line in enumerate(lines):
+            m = re.match(
+                r"^\s*K_POINTS(?:\s*\{?\s*([^}\s]+)\s*\}?)?",
+                line,
+                re.I,
+            )
+
+            if not m:
+                continue
+
+            mode = (
+                m.group(1).lower()
+                if m.group(1)
+                else "tpiba"
+            )
+
+            info = {
+                "mode": mode,
+                "grid": None,
+                "count": None,
+            }
+
+            if mode == "automatic":
+                if i + 1 < len(lines):
+                    vals = lines[i + 1].split()
+
+                    if len(vals) >= 6:
+                        info["grid"] = " ".join(vals[:6])
+
+            elif mode in (
+                "crystal",
+                "tpiba",
+                "crystal_b",
+                "tpiba_b",
+            ):
+                if i + 1 < len(lines):
+                    try:
+                        info["count"] = int(
+                            lines[i + 1].split()[0]
+                        )
+                    except Exception:
+                        pass
+
+            elif mode == "gamma":
+                info["count"] = 1
+
+            return info
+
+        return None
+
+    def detect_input_calc(text):
+        s = parse_qe_input_settings(text)
+        return s.get("calculation", "UNKNOWN").upper()
+
+    def candidate_outputs_for_input(input_file, settings):
+        """
+        Prefer outputs sharing the input stem/prefix, but also inspect
+        directory outputs and verify metadata before claiming a match.
+        """
+        outs = [
+            f for f in input_file.parent.glob("*.out")
+            if f.is_file()
+        ]
+
+        prefix = settings.get("prefix")
+        stem = input_file.stem.lower()
+
+        scored = []
+
+        for f in outs:
+            score = 0
+            name = f.name.lower()
+
+            if stem in name:
+                score += 5
+
+            if prefix and clean_value(prefix).lower() in name:
+                score += 4
+
+            try:
+                t = read(f)
+            except Exception:
+                continue
+
+            if "Program PWSCF" not in t:
+                continue
+
+            if prefix:
+                # QE outputs do not always print prefix plainly, so
+                # absence is not grounds for rejection.
+                if clean_value(prefix) in t:
+                    score += 2
+
+            scored.append(
+                (score, f.stat().st_mtime, f, t)
+            )
+
+        scored.sort(
+            key=lambda x: (x[0], x[1]),
+            reverse=True,
+        )
+
+        return scored
+
+    def parse_slurm_script(script):
+        txt = read(script)
+
+        def sbatch(name):
+            m = re.search(
+                rf"(?m)^\s*#SBATCH\s+--{re.escape(name)}(?:=|\s+)(\S+)",
+                txt,
+            )
+            return m.group(1) if m else None
+
+        module_lines = [
+            x.strip()
+            for x in txt.splitlines()
+            if re.match(
+                r"^\s*module\s+(load|reset|swap)\b",
+                x,
+            )
+        ]
+
+        srun_lines = [
+            x.strip()
+            for x in txt.splitlines()
+            if re.search(r"\bsrun\b.*\bpw\.x\b", x)
+        ]
+
+        return {
+            "nodes": sbatch("nodes"),
+            "ntasks_per_node": sbatch("ntasks-per-node"),
+            "cpus_per_task": sbatch("cpus-per-task"),
+            "time": sbatch("time"),
+            "constraint": sbatch("constraint"),
+            "modules": module_lines,
+            "srun": srun_lines,
+            "text": txt,
+        }
+
+    def find_related_scripts(input_file):
+        scripts = sorted(
+            f for f in input_file.parent.glob("*.sh")
+            if f.is_file()
+        )
+
+        exact = []
+
+        for f in scripts:
+            try:
+                t = read(f)
+            except Exception:
+                continue
+
+            if input_file.name in t:
+                exact.append(f)
+
+        return exact, scripts
+
+    overall_failures = 0
+    overall_warnings = 0
+    overall_passes = 0
+
+    print("=" * 100)
     print(
-        f"Input files                  : {len(ins)}"
+        "QECHECK — RESEARCH-GRADE QUANTUM ESPRESSO "
+        "INTEGRITY CHECKER v0.5"
     )
+    print("=" * 100)
 
-    print(
-        f"Output files                 : {len(outs)}"
-    )
+    print(f"Target                      : {target.resolve()}")
+    print(f"Inputs detected             : {len(inputs)}")
 
-    print(
-        f"Error files                  : {len(errs)}"
-    )
+    # --------------------------------------------------------
+    # EACH INPUT
+    # --------------------------------------------------------
 
-    for f in sorted(ins):
-        text = read(f)
-        settings = parse_qe_input_settings(
-            text
+    for idx, inp in enumerate(inputs, 1):
+        txt = read(inp)
+        settings = parse_qe_input_settings(txt)
+
+        local_fail = []
+        local_warn = []
+        local_pass = []
+
+        # Restart-state problems are treated separately from intrinsic
+        # input/calculation-integrity problems.  Historical calculations
+        # may have completed successfully even if their scratch/restart
+        # files were later removed.
+        restart_issues = []
+
+        print("\n" + "=" * 100)
+        print(f"[{idx}/{len(inputs)}] INPUT: {inp.name}")
+        print("=" * 100)
+
+        calc = clean_value(
+            settings.get("calculation")
+        )
+
+        prefix = clean_value(
+            settings.get("prefix")
+        )
+
+        outdir_raw = clean_value(
+            settings.get("outdir")
+        )
+
+        pseudo_raw = clean_value(
+            settings.get("pseudo_dir")
+        )
+
+        nat_raw = clean_value(
+            settings.get("nat")
+        )
+
+        ntyp_raw = clean_value(
+            settings.get("ntyp")
+        )
+
+        print("\nINPUT CLASSIFICATION / CORE SETTINGS")
+
+        print(
+            f"{'calculation':<30}: "
+            f"{calc if calc else 'MISSING'}"
         )
 
         print(
-            f"\nINPUT: {f.name}"
+            f"{'prefix':<30}: "
+            f"{prefix if prefix else 'MISSING'}"
+        )
+
+        print(
+            f"{'outdir':<30}: "
+            f"{outdir_raw if outdir_raw else 'MISSING'}"
+        )
+
+        print(
+            f"{'pseudo_dir':<30}: "
+            f"{pseudo_raw if pseudo_raw else 'MISSING'}"
         )
 
         for key in [
-            "calculation",
-            "restart_mode",
-            "prefix",
-            "outdir",
-            "pseudo_dir",
             "nat",
+            "ntyp",
             "nbnd",
+            "ecutwfc",
+            "ecutrho",
             "occupations",
             "smearing",
             "degauss",
             "conv_thr",
             "etot_conv_thr",
+            "forc_conv_thr",
+            "electron_maxstep",
+            "diagonalization",
             "mixing_beta",
             "mixing_mode",
+            "restart_mode",
             "startingwfc",
             "startingpot",
             "max_seconds",
         ]:
             if key in settings:
                 print(
-                    f"  {key:<18} {settings[key]}"
+                    f"{key:<30}: {settings[key]}"
                 )
 
-        pdir = settings.get(
-            "pseudo_dir"
-        )
-
-        if pdir:
-            pp = Path(pdir)
-
-            print(
-                f"  {'pseudo_dir exists':<18} "
-                f"{'YES' if pp.exists() else 'NO'}"
+        if not calc:
+            local_fail.append(
+                "calculation is missing from &CONTROL"
+            )
+        else:
+            local_pass.append(
+                f"calculation identified as {calc}"
             )
 
+        if not prefix:
+            local_warn.append(
+                "prefix is not explicitly defined"
+            )
+
+        # ----------------------------------------------------
+        # ATOM / SPECIES CONSISTENCY
+        # ----------------------------------------------------
+
+        species = parse_atomic_species(txt)
+        npos = count_atomic_positions(txt)
+
+        print("\nSTRUCTURE CONSISTENCY")
+
+        print(
+            f"{'ATOMIC_SPECIES entries':<30}: {len(species)}"
+        )
+
+        print(
+            f"{'ATOMIC_POSITIONS count':<30}: "
+            f"{npos if npos is not None else 'NOT FOUND'}"
+        )
+
+        if nat_raw is not None:
+            try:
+                nat = int(float(nat_raw))
+
+                print(
+                    f"{'nat declared':<30}: {nat}"
+                )
+
+                if npos is None:
+                    local_warn.append(
+                        "nat is declared but no ATOMIC_POSITIONS block was parsed"
+                    )
+                elif nat == npos:
+                    local_pass.append(
+                        f"nat matches ATOMIC_POSITIONS ({nat})"
+                    )
+                else:
+                    local_fail.append(
+                        f"nat={nat} but parsed {npos} atomic positions"
+                    )
+
+            except Exception:
+                local_fail.append(
+                    f"could not parse nat={nat_raw}"
+                )
+
+        else:
+            local_fail.append(
+                "nat is missing"
+            )
+
+        if ntyp_raw is not None:
+            try:
+                ntyp = int(float(ntyp_raw))
+
+                print(
+                    f"{'ntyp declared':<30}: {ntyp}"
+                )
+
+                if species:
+                    if ntyp == len(species):
+                        local_pass.append(
+                            f"ntyp matches ATOMIC_SPECIES ({ntyp})"
+                        )
+                    else:
+                        local_fail.append(
+                            f"ntyp={ntyp} but found {len(species)} "
+                            "ATOMIC_SPECIES entries"
+                        )
+
+            except Exception:
+                local_fail.append(
+                    f"could not parse ntyp={ntyp_raw}"
+                )
+
+        elif species:
+            local_warn.append(
+                "ntyp is not explicitly parsed from input settings"
+            )
+
+        # ----------------------------------------------------
+        # PSEUDOPOTENTIALS
+        # ----------------------------------------------------
+
+        print("\nPSEUDOPOTENTIAL INTEGRITY")
+
+        pseudo_dir = resolve_from_input(
+            pseudo_raw,
+            inp,
+        )
+
+        if pseudo_dir is None:
+            print(
+                f"{'pseudo_dir resolved':<30}: MISSING"
+            )
+            local_fail.append(
+                "pseudo_dir is missing"
+            )
+
+        else:
+            print(
+                f"{'pseudo_dir resolved':<30}: {pseudo_dir}"
+            )
+
+            if pseudo_dir.is_dir():
+                local_pass.append(
+                    "pseudo_dir exists"
+                )
+            else:
+                local_fail.append(
+                    f"pseudo_dir does not exist: {pseudo_dir}"
+                )
+
+        if not species:
+            print("No ATOMIC_SPECIES entries parsed.")
+            local_fail.append(
+                "ATOMIC_SPECIES could not be parsed"
+            )
+
+        else:
+            for symbol, mass, pseudo_name in species:
+                pp = (
+                    pseudo_dir / pseudo_name
+                    if pseudo_dir is not None
+                    else None
+                )
+
+                exists = (
+                    pp.is_file()
+                    if pp is not None
+                    else False
+                )
+
+                print(
+                    f"  {symbol:<4} "
+                    f"{pseudo_name:<42} "
+                    f"{'FOUND' if exists else 'MISSING'}"
+                )
+
+                if exists:
+                    local_pass.append(
+                        f"{symbol} pseudopotential exists"
+                    )
+                else:
+                    local_fail.append(
+                        f"missing pseudopotential for {symbol}: "
+                        f"{pseudo_name}"
+                    )
+
+        # ----------------------------------------------------
+        # K-POINTS
+        # ----------------------------------------------------
+
+        print("\nK-POINT SAMPLING")
+
+        kp = parse_kpoints(txt)
+
+        if kp is None:
+            print(
+                f"{'K_POINTS':<30}: NOT FOUND"
+            )
+            local_fail.append(
+                "K_POINTS card not found"
+            )
+
+        else:
+            print(
+                f"{'K_POINTS mode':<30}: {kp['mode']}"
+            )
+
+            if kp["grid"]:
+                print(
+                    f"{'Automatic grid + shift':<30}: {kp['grid']}"
+                )
+
+            if kp["count"] is not None:
+                print(
+                    f"{'Explicit k-point count':<30}: {kp['count']}"
+                )
+
+            local_pass.append(
+                f"K_POINTS detected ({kp['mode']})"
+            )
+
+        # ----------------------------------------------------
+        # NUMERICAL SANITY
+        # ----------------------------------------------------
+
+        print("\nNUMERICAL / ELECTRONIC SETTINGS")
+
+        occ = clean_value(
+            settings.get("occupations")
+        )
+
+        smear = clean_value(
+            settings.get("smearing")
+        )
+
+        degauss = clean_value(
+            settings.get("degauss")
+        )
+
+        if occ:
+            print(
+                f"{'occupations':<30}: {occ}"
+            )
+
+        if smear:
+            print(
+                f"{'smearing':<30}: {smear}"
+            )
+
+        if degauss:
+            print(
+                f"{'degauss':<30}: {degauss}"
+            )
+
+        if occ and occ.lower() == "smearing":
+            if not smear:
+                local_warn.append(
+                    "occupations='smearing' but smearing type was not parsed"
+                )
+
+            if not degauss:
+                local_warn.append(
+                    "occupations='smearing' but degauss was not parsed"
+                )
+
+        for key in (
+            "ecutwfc",
+            "ecutrho",
+            "conv_thr",
+            "electron_maxstep",
+            "diagonalization",
+            "mixing_beta",
+            "mixing_mode",
+        ):
+            if key not in settings:
+                local_warn.append(
+                    f"{key} not explicitly parsed from input"
+                )
+
+        try:
+            ewfc = dfloat(settings["ecutwfc"])
+            erho = dfloat(settings["ecutrho"])
+
+            ratio = erho / ewfc
+
+            print(
+                f"{'ecutrho / ecutwfc':<30}: {ratio:.3f}"
+            )
+
+            if ratio <= 1:
+                local_fail.append(
+                    "ecutrho <= ecutwfc is suspicious/inconsistent"
+                )
+            else:
+                local_pass.append(
+                    "ecutrho > ecutwfc"
+                )
+
+        except Exception:
+            pass
+
+        # ----------------------------------------------------
+        # RESTART / SAVE DIRECTORY
+        # ----------------------------------------------------
+
+        print("\nRESTART / SAVE-DIRECTORY INTEGRITY")
+
+        restart_mode = clean_value(
+            settings.get("restart_mode")
+        )
+
+        startingwfc = clean_value(
+            settings.get("startingwfc")
+        )
+
+        startingpot = clean_value(
+            settings.get("startingpot")
+        )
+
+        outdir = resolve_from_input(
+            outdir_raw,
+            inp,
+        )
+
+        print(
+            f"{'restart_mode':<30}: "
+            f"{restart_mode if restart_mode else 'default/from_scratch'}"
+        )
+
+        print(
+            f"{'startingwfc':<30}: "
+            f"{startingwfc if startingwfc else 'default'}"
+        )
+
+        print(
+            f"{'startingpot':<30}: "
+            f"{startingpot if startingpot else 'default'}"
+        )
+
+        if outdir is None:
+            print(
+                f"{'outdir resolved':<30}: MISSING"
+            )
+            local_fail.append(
+                "outdir is missing"
+            )
+            save_dir = None
+
+        else:
+            print(
+                f"{'outdir resolved':<30}: {outdir}"
+            )
+
+            if outdir.exists():
+                local_pass.append(
+                    "outdir exists"
+                )
+            else:
+                local_warn.append(
+                    f"outdir does not currently exist: {outdir}"
+                )
+
+            save_dir = (
+                outdir / f"{prefix}.save"
+                if prefix
+                else None
+            )
+
+        if save_dir is not None:
+            print(
+                f"{'expected .save directory':<30}: {save_dir}"
+            )
+
+            if save_dir.is_dir():
+                local_pass.append(
+                    "expected prefix.save directory exists"
+                )
+
+                charge_files = list(
+                    save_dir.glob("charge-density*")
+                )
+
+                xml_files = list(
+                    save_dir.glob("data-file-schema*")
+                )
+
+                wfc_in_save = list(
+                    save_dir.glob("*.wfc*")
+                )
+
+                print(
+                    f"{'charge-density files':<30}: "
+                    f"{len(charge_files)}"
+                )
+
+                print(
+                    f"{'data-file-schema files':<30}: "
+                    f"{len(xml_files)}"
+                )
+
+                print(
+                    f"{'wavefunctions in .save':<30}: "
+                    f"{len(wfc_in_save)}"
+                )
+
+                if charge_files:
+                    local_pass.append(
+                        "charge density exists"
+                    )
+                else:
+                    local_warn.append(
+                        "no charge-density file found in prefix.save"
+                    )
+
+                if xml_files:
+                    local_pass.append(
+                        "data-file-schema exists"
+                    )
+                else:
+                    local_warn.append(
+                        "no data-file-schema file found in prefix.save"
+                    )
+
+            else:
+                needs_restart_files = (
+                    (restart_mode and restart_mode.lower() == "restart")
+                    or (
+                        startingwfc
+                        and startingwfc.lower() == "file"
+                    )
+                    or (
+                        startingpot
+                        and startingpot.lower() == "file"
+                    )
+                )
+
+                if needs_restart_files:
+                    restart_issues.append(
+                        "restart/file initialization requested but expected "
+                        "prefix.save directory is absent"
+                    )
+                else:
+                    local_warn.append(
+                        "expected prefix.save directory does not exist yet"
+                    )
+
+        if outdir is not None and outdir.is_dir() and prefix:
+            restart_scf = list(
+                outdir.glob(
+                    f"{prefix}.restart_scf*"
+                )
+            )
+
+            restart_k = list(
+                outdir.glob(
+                    f"{prefix}.restart_k*"
+                )
+            )
+
+            wfcs = list(
+                outdir.glob(
+                    f"{prefix}.wfc*"
+                )
+            )
+
+            print(
+                f"{'restart_scf files':<30}: {len(restart_scf)}"
+            )
+
+            print(
+                f"{'restart_k files':<30}: {len(restart_k)}"
+            )
+
+            print(
+                f"{'top-level wfc files':<30}: {len(wfcs)}"
+            )
+
+        if restart_mode and restart_mode.lower() == "restart":
+            if save_dir is not None and save_dir.is_dir():
+                local_pass.append(
+                    "restart_mode='restart' has existing save directory"
+                )
+            else:
+                restart_issues.append(
+                    "restart_mode='restart' without usable prefix.save directory"
+                )
+
+        if startingpot and startingpot.lower() == "file":
+            if save_dir is not None and save_dir.is_dir():
+                local_pass.append(
+                    "startingpot='file' has save-state evidence"
+                )
+            else:
+                restart_issues.append(
+                    "startingpot='file' but no prefix.save directory exists"
+                )
+
+        # startingwfc='file' can use WFCs in outdir rather than inside .save
+        if startingwfc and startingwfc.lower() == "file":
+            any_wfc = False
+
+            if outdir is not None and outdir.is_dir() and prefix:
+                any_wfc = bool(
+                    list(outdir.glob(f"{prefix}.wfc*"))
+                )
+
+            if save_dir is not None and save_dir.is_dir():
+                any_wfc = (
+                    any_wfc
+                    or bool(list(save_dir.glob("*.wfc*")))
+                )
+
+            if any_wfc:
+                local_pass.append(
+                    "startingwfc='file' has wavefunction evidence"
+                )
+            else:
+                restart_issues.append(
+                    "startingwfc='file' but no matching wavefunction files found"
+                )
+
+        # ----------------------------------------------------
+        # OUTPUT CROSS-CHECK
+        # ----------------------------------------------------
+
+        print("\nINPUT ↔ OUTPUT CROSS-CHECK")
+
+        historical_output_found = False
+        historical_output_success = False
+        historical_output_status = None
+        historical_output_file = None
+
+        output_candidates = candidate_outputs_for_input(
+            inp,
+            settings,
+        )
+
+        if not output_candidates:
+            print(
+                f"{'QE output candidate':<30}: NONE"
+            )
+            local_warn.append(
+                "no corresponding PWSCF output candidate found"
+            )
+
+        else:
+            best_score, _, out_file, out_text = output_candidates[0]
+
+            print(
+                f"{'Best output candidate':<30}: {out_file.name}"
+            )
+
+            print(
+                f"{'Output match score':<30}: {best_score}"
+            )
+
+            out_core = output_core(out_text)
+
+            mnat = re.search(
+                r"number of atoms/cell\s*=\s*(\d+)",
+                out_text,
+                re.I,
+            )
+
+            if mnat and nat_raw is not None:
+                try:
+                    out_nat = int(mnat.group(1))
+                    in_nat = int(float(nat_raw))
+
+                    print(
+                        f"{'Output atom count':<30}: {out_nat}"
+                    )
+
+                    if out_nat == in_nat:
+                        local_pass.append(
+                            "input/output atom counts agree"
+                        )
+                    else:
+                        local_fail.append(
+                            f"input nat={in_nat}, output atoms={out_nat}"
+                        )
+                except Exception:
+                    pass
+
+            mks = re.search(
+                r"number of Kohn-Sham states\s*=\s*(\d+)",
+                out_text,
+                re.I,
+            )
+
+            if mks and settings.get("nbnd"):
+                try:
+                    out_nbnd = int(mks.group(1))
+                    in_nbnd = int(
+                        float(settings["nbnd"])
+                    )
+
+                    print(
+                        f"{'Output KS states':<30}: {out_nbnd}"
+                    )
+
+                    if out_nbnd == in_nbnd:
+                        local_pass.append(
+                            "input nbnd matches output KS states"
+                        )
+                    else:
+                        local_warn.append(
+                            f"input nbnd={in_nbnd}, output states={out_nbnd}"
+                        )
+                except Exception:
+                    pass
+
+            flags = termination_flags(
+                out_text
+            )
+
+            typ = classify_output(
+                out_file,
+                out_text,
+            )
+
+            print(
+                f"{'Output classification':<30}: {typ}"
+            )
+
+            historical_output_found = True
+            historical_output_file = out_file
+
+            historical_output_status = summary_status(
+                out_text,
+                typ
+            )
+
+            print(
+                f"{'Output status':<30}: "
+                f"{historical_output_status}"
+            )
+
+            historical_output_success = (
+                historical_output_status in (
+                    "CONVERGED",
+                    "RELAX CONV",
+                )
+            )
+
+            if flags["error"]:
+                local_fail.append(
+                    f"candidate output contains QE runtime error: {out_file.name}"
+                )
+
+            if show_all:
+                print(
+                    f"{'Residual samples':<30}: "
+                    f"{len(out_core.get('acc', []))}"
+                )
+
+        # ----------------------------------------------------
+        # HISTORICAL INTEGRITY VS CURRENT RESTARTABILITY
+        # ----------------------------------------------------
+
+        print("\nHISTORICAL INTEGRITY / CURRENT RESTARTABILITY")
+
+        restart_requested = bool(
+            (restart_mode and restart_mode.lower() == "restart")
+            or (startingwfc and startingwfc.lower() == "file")
+            or (startingpot and startingpot.lower() == "file")
+        )
+
+        restartable_now = (
+            restart_requested
+            and not restart_issues
+        )
+
+        if historical_output_success:
+            print(
+                f"{'Historical run integrity':<30}: PASS"
+            )
+            print(
+                f"{'Evidence':<30}: "
+                f"{historical_output_file.name} "
+                f"[{historical_output_status}]"
+            )
+
+            local_pass.append(
+                "historical output demonstrates successful calculation"
+            )
+
+            if restart_requested:
+                if restartable_now:
+                    print(
+                        f"{'Restartable right now':<30}: YES"
+                    )
+                    local_pass.append(
+                        "requested restart state is currently available"
+                    )
+                else:
+                    print(
+                        f"{'Restartable right now':<30}: NO"
+                    )
+
+                    for issue in restart_issues:
+                        local_warn.append(
+                            "current restartability: " + issue
+                        )
+
+                    print(
+                        f"{'Interpretation':<30}: "
+                        "historical run succeeded, but its required "
+                        "restart state is no longer fully present"
+                    )
+            else:
+                print(
+                    f"{'Restartability required':<30}: NO"
+                )
+
+        else:
+            if historical_output_found:
+                print(
+                    f"{'Historical run integrity':<30}: "
+                    f"NOT ESTABLISHED"
+                )
+                print(
+                    f"{'Evidence':<30}: "
+                    f"{historical_output_file.name} "
+                    f"[{historical_output_status}]"
+                )
+            else:
+                print(
+                    f"{'Historical run integrity':<30}: UNKNOWN"
+                )
+
+            if restart_requested:
+                if restartable_now:
+                    print(
+                        f"{'Restartable right now':<30}: YES"
+                    )
+                    local_pass.append(
+                        "requested restart state is currently available"
+                    )
+                else:
+                    print(
+                        f"{'Restartable right now':<30}: NO"
+                    )
+
+                    # For an unproven/current restart calculation, missing
+                    # restart files remain real integrity failures.
+                    for issue in restart_issues:
+                        local_fail.append(issue)
+            else:
+                print(
+                    f"{'Restartability required':<30}: NO"
+                )
+
+        # ----------------------------------------------------
+        # SLURM / EXECUTION SCRIPT
+        # ----------------------------------------------------
+
+        print("\nSLURM / LAUNCH SCRIPT")
+
+        related_scripts, all_scripts = find_related_scripts(
+            inp
+        )
+
+        scripts_to_show = (
+            related_scripts
+            if related_scripts
+            else []
+        )
+
+        if not scripts_to_show:
+            print(
+                f"{'Script referencing input':<30}: NONE"
+            )
+
+            if all_scripts:
+                local_warn.append(
+                    "no .sh script explicitly references this input file"
+                )
+
+                if show_all:
+                    print(
+                        "Available shell scripts:"
+                    )
+                    for sh in all_scripts[:15]:
+                        print(
+                            f"  {sh.name}"
+                        )
+            else:
+                local_warn.append(
+                    "no Slurm/shell scripts found in calculation directory"
+                )
+
+        else:
+            for sh in scripts_to_show:
+                info = parse_slurm_script(
+                    sh
+                )
+
+                print(
+                    f"{'Script':<30}: {sh.name}"
+                )
+
+                print(
+                    f"{'  nodes':<30}: "
+                    f"{info['nodes'] or 'NOT FOUND'}"
+                )
+
+                print(
+                    f"{'  ntasks-per-node':<30}: "
+                    f"{info['ntasks_per_node'] or 'NOT FOUND'}"
+                )
+
+                print(
+                    f"{'  cpus-per-task':<30}: "
+                    f"{info['cpus_per_task'] or 'NOT FOUND'}"
+                )
+
+                print(
+                    f"{'  time':<30}: "
+                    f"{info['time'] or 'NOT FOUND'}"
+                )
+
+                if info["constraint"]:
+                    print(
+                        f"{'  constraint':<30}: "
+                        f"{info['constraint']}"
+                    )
+
+                if info["modules"]:
+                    for line in info["modules"]:
+                        print(
+                            f"{'  module':<30}: {line}"
+                        )
+
+                else:
+                    local_warn.append(
+                        f"{sh.name}: no module command found"
+                    )
+
+                if info["srun"]:
+                    for line in info["srun"]:
+                        print(
+                            f"{'  launch':<30}: {line}"
+                        )
+
+                    local_pass.append(
+                        f"{sh.name} launches pw.x"
+                    )
+
+                else:
+                    local_fail.append(
+                        f"{sh.name}: no srun ... pw.x launch found"
+                    )
+
+                has_reset = any(
+                    re.search(
+                        r"\bmodule\s+reset\b",
+                        x,
+                    )
+                    for x in info["modules"]
+                )
+
+                if not has_reset:
+                    local_warn.append(
+                        f"{sh.name}: no 'module reset' before QE environment setup"
+                    )
+
+                qe_modules = [
+                    x for x in info["modules"]
+                    if "espresso" in x.lower()
+                ]
+
+                if qe_modules:
+                    local_pass.append(
+                        f"{sh.name} loads Quantum ESPRESSO module"
+                    )
+                else:
+                    local_warn.append(
+                        f"{sh.name}: no espresso module load detected"
+                    )
+
+                # Cross-check MPI ranks if values are plain integers.
+                try:
+                    nodes = int(info["nodes"])
+                    ntpn = int(info["ntasks_per_node"])
+                    expected_ranks = nodes * ntpn
+
+                    if info["srun"]:
+                        launch = info["srun"][0]
+
+                        m = re.search(
+                            r"(?:^|\s)-n\s+(\d+)",
+                            launch,
+                        )
+
+                        if not m:
+                            m = re.search(
+                                r"--ntasks(?:=|\s+)(\d+)",
+                                launch,
+                            )
+
+                        if m:
+                            launched = int(
+                                m.group(1)
+                            )
+
+                            print(
+                                f"{'  expected MPI ranks':<30}: "
+                                f"{expected_ranks}"
+                            )
+
+                            print(
+                                f"{'  launched MPI ranks':<30}: "
+                                f"{launched}"
+                            )
+
+                            if launched == expected_ranks:
+                                local_pass.append(
+                                    f"{sh.name}: srun ranks match "
+                                    "nodes × ntasks-per-node"
+                                )
+                            else:
+                                local_warn.append(
+                                    f"{sh.name}: srun -n {launched} but "
+                                    f"nodes×ntasks-per-node={expected_ranks}"
+                                )
+
+                except Exception:
+                    pass
+
+        # ----------------------------------------------------
+        # FINAL PER-INPUT VERDICT
+        # ----------------------------------------------------
+
+        print("\nCHECK SUMMARY")
+
+        print(
+            f"{'PASS checks':<30}: {len(local_pass)}"
+        )
+
+        print(
+            f"{'Warnings':<30}: {len(local_warn)}"
+        )
+
+        print(
+            f"{'Failures':<30}: {len(local_fail)}"
+        )
+
+        if local_fail:
+            verdict = "FAIL"
+
+        elif local_warn:
+            verdict = "WARNING"
+
+        else:
+            verdict = "PASS"
+
+        print(
+            f"{'INTEGRITY VERDICT':<30}: {verdict}"
+        )
+
+        if local_fail:
+            print("\nFAILURES")
+            for item in local_fail:
+                print(
+                    f"  [FAIL] {item}"
+                )
+
+        if local_warn:
+            print("\nWARNINGS")
+            for item in local_warn:
+                print(
+                    f"  [WARN] {item}"
+                )
+
+        if show_all and local_pass:
+            print("\nPASSED CHECKS")
+            for item in local_pass:
+                print(
+                    f"  [PASS] {item}"
+                )
+
+        overall_failures += len(
+            local_fail
+        )
+
+        overall_warnings += len(
+            local_warn
+        )
+
+        overall_passes += len(
+            local_pass
+        )
+
+    # --------------------------------------------------------
+    # DIRECTORY-WIDE SUMMARY
+    # --------------------------------------------------------
+
+    print("\n" + "=" * 100)
+    print("QECHECK — DIRECTORY / REQUEST SUMMARY")
+    print("=" * 100)
+
     print(
-        "\nFurther input ↔ save-dir ↔ Slurm ↔ output "
-        "cross-checking will be added after SCF/history validation."
+        f"{'Inputs inspected':<30}: {len(inputs)}"
     )
+
+    print(
+        f"{'Total passed checks':<30}: {overall_passes}"
+    )
+
+    print(
+        f"{'Total warnings':<30}: {overall_warnings}"
+    )
+
+    print(
+        f"{'Total failures':<30}: {overall_failures}"
+    )
+
+    if overall_failures:
+        final = "FAIL"
+
+    elif overall_warnings:
+        final = "WARNING"
+
+    else:
+        final = "PASS"
+
+    print(
+        f"{'OVERALL INTEGRITY':<30}: {final}"
+    )
+
+    print("\nINTERPRETATION")
+
+    if final == "PASS":
+        print(
+            "PASS — no input/path/restart/launch inconsistencies were "
+            "detected by the implemented checks."
+        )
+
+    elif final == "WARNING":
+        print(
+            "WARNING — no hard inconsistency was detected, but one or "
+            "more settings or pieces of evidence should be reviewed."
+        )
+
+    else:
+        print(
+            "FAIL — at least one concrete calculation-integrity problem "
+            "was detected. Correct it before relying on or restarting "
+            "the affected calculation."
+        )
+
+    print("\nUSEFUL COMMANDS")
+    print(
+        "  qecheck .                # inspect inputs in current directory"
+    )
+    print(
+        "  qecheck INPUT.in         # inspect one exact input"
+    )
+    print(
+        "  qecheck --all            # include detailed passed evidence"
+    )
+    print(
+        "  qescf -l                 # SCF candidates/results"
+    )
+    print(
+        "  qerelax -l               # relaxation candidates/results"
+    )
+    print(
+        "  qehistory                # chronological QE calculation history"
+    )
+
+    print("=" * 100)
 
 
 # ============================================================
