@@ -361,6 +361,71 @@ def latest_electronic_status(text):
     return "UNKNOWN"
 
 
+
+def relaxation_electronic_detail(text):
+    """
+    Separate completed electronic SCF cycles from a possibly unfinished
+    current SCF cycle at the end of a relaxation output.
+    """
+
+    conv_matches = list(re.finditer(
+        r"convergence has been achieved in\s+(\d+)\s+iterations",
+        text,
+        re.I,
+    ))
+
+    iter_matches = list(re.finditer(
+        r"iteration #\s*(\d+)",
+        text,
+        re.I,
+    ))
+
+    notconv_matches = list(re.finditer(
+        r"convergence NOT achieved",
+        text,
+        re.I,
+    ))
+
+    error_matches = list(re.finditer(
+        r"Error in routine",
+        text,
+        re.I,
+    ))
+
+    n_converged = len(conv_matches)
+
+    last_conv_pos = conv_matches[-1].start() if conv_matches else -1
+    last_iter_pos = iter_matches[-1].start() if iter_matches else -1
+    last_notconv_pos = notconv_matches[-1].start() if notconv_matches else -1
+    last_error_pos = error_matches[-1].start() if error_matches else -1
+
+    if last_error_pos >= 0:
+        current_status = "ERROR"
+    elif last_notconv_pos > last_conv_pos:
+        current_status = "NOT CONVERGED"
+    elif last_iter_pos > last_conv_pos:
+        current_status = "INCOMPLETE"
+    elif last_conv_pos >= 0:
+        current_status = "CONVERGED"
+    else:
+        current_status = "UNKNOWN"
+
+    if n_converged > 0:
+        last_completed_status = "CONVERGED"
+        last_completed_iterations = int(
+            conv_matches[-1].group(1)
+        )
+    else:
+        last_completed_status = "UNKNOWN"
+        last_completed_iterations = None
+
+    return {
+        "n_converged": n_converged,
+        "last_completed_status": last_completed_status,
+        "last_completed_iterations": last_completed_iterations,
+        "current_status": current_status,
+    }
+
 def ionic_status(text, calc_type):
     if calc_type not in ("RELAX", "VC-RELAX"):
         return "N/A"
@@ -1079,18 +1144,286 @@ Explicit file:
 # ============================================================
 
 def relax(path=None):
+    """
+    Research-grade Quantum ESPRESSO structural-relaxation analyzer.
+
+    Usage:
+        qerelax
+        qerelax FILE.out
+        qerelax DIRECTORY
+        qerelax -l
+        qerelax --list
+        qerelax --best
+        qerelax --help
+
+    Default:
+        Analyze the newest relaxation-like QE output in the directory.
+
+    --best:
+        Prefer an ionically converged relaxation. Among converged
+        candidates, choose the one with the smallest final parsed force.
+        If none converged, choose the newest relaxation attempt.
+    """
+
     args = sys.argv[1:]
 
     if path is None:
-        path = args[0] if args else "."
+        path = "."
 
-    p = Path(path)
+    show_list = False
+    choose_best = False
 
-    if p.is_dir():
+    if args:
+        if args[0] in ("-h", "--help"):
+            print("""
+Usage:
+  qerelax
+  qerelax FILE.out
+  qerelax DIRECTORY
+  qerelax -l
+  qerelax --list
+  qerelax --best
+
+Default:
+  Analyze the newest true RELAX / VC-RELAX QE output in the directory.
+
+Explicit file:
+  Analyze exactly that file.
+
+--best:
+  Prefer an ionically converged relaxation with the smallest final force.
+
+--list:
+  Show all detected relaxation candidates.
+""".strip())
+            return
+
+        if args[0] in ("-l", "--list"):
+            show_list = True
+            if len(args) > 1:
+                path = args[1]
+
+        elif args[0] == "--best":
+            choose_best = True
+            if len(args) > 1:
+                path = args[1]
+
+        else:
+            path = args[0]
+
+    def parse_relaxation(text):
+        # Use "!" energies as the cleanest representation of completed
+        # self-consistent ionic configurations.
+        ionic_energies = [
+            dfloat(x)
+            for x in re.findall(
+                r"(?im)^\s*!\s+total energy\s*=\s*(" + FLOAT + r")\s*Ry",
+                text
+            )
+        ]
+
+        forces = [
+            dfloat(x)
+            for x in re.findall(
+                r"Total force\s*=\s*(" + FLOAT + r")",
+                text,
+                re.I
+            )
+        ]
+
+        scf_cycles = [
+            int(x)
+            for x in re.findall(
+                r"convergence has been achieved in\s+(\d+)\s+iterations",
+                text,
+                re.I
+            )
+        ]
+
+        energy_errors = [
+            dfloat(x)
+            for x in re.findall(
+                r"Energy error\s*=\s*(" + FLOAT + r")\s*Ry",
+                text,
+                re.I
+            )
+        ]
+
+        gradient_errors = [
+            dfloat(x)
+            for x in re.findall(
+                r"Gradient error\s*=\s*(" + FLOAT + r")\s*Ry/Bohr",
+                text,
+                re.I
+            )
+        ]
+
+        bfgs_conv = bool(
+            re.search(r"\bbfgs converged\b", text, re.I)
+        )
+
+        end_bfgs = bool(
+            re.search(
+                r"End of BFGS Geometry Optimization",
+                text,
+                re.I
+            )
+        )
+
+        bfgs_summary = re.findall(
+            r"bfgs converged in\s+(\d+)\s+scf cycles\s+and\s+(\d+)\s+bfgs steps",
+            text,
+            re.I
+        )
+
+        final_energy = re.findall(
+            r"Final energy\s*=\s*(" + FLOAT + r")\s*Ry",
+            text,
+            re.I
+        )
+
+        final_energy = (
+            dfloat(final_energy[-1])
+            if final_energy
+            else None
+        )
+
+        job_done = "JOB DONE." in text
+
+        wall_stop = bool(
+            re.search(
+                r"Maximum CPU time exceeded",
+                text,
+                re.I
+            )
+        )
+
+        stopped = bool(
+            re.search(
+                r"Calculation stopped",
+                text,
+                re.I
+            )
+        )
+
+        explicit_notconv = bool(
+            re.search(
+                r"convergence NOT achieved",
+                text,
+                re.I
+            )
+        )
+
+        qe_error = re.search(
+            r"Error in routine\s+([^( \n]+)",
+            text,
+            re.I
+        )
+
+        final_coord_begin = len(
+            re.findall(
+                r"Begin final coordinates",
+                text,
+                re.I
+            )
+        )
+
+        final_coord_end = len(
+            re.findall(
+                r"End final coordinates",
+                text,
+                re.I
+            )
+        )
+
+        atomic_position_blocks = len(
+            re.findall(
+                r"(?im)^\s*ATOMIC_POSITIONS\b",
+                text
+            )
+        )
+
+        cell_blocks = len(
+            re.findall(
+                r"(?im)^\s*CELL_PARAMETERS\b",
+                text
+            )
+        )
+
+        stresses = [
+            dfloat(x)
+            for x in re.findall(
+                r"total\s+stress\s+\(Ry/bohr\*\*3\)\s*=\s*(" + FLOAT + r")",
+                text,
+                re.I
+            )
+        ]
+
+        timing = last_or(
+            re.findall(
+                r"(?m)^.*PWSCF.*WALL.*$",
+                text
+            )
+        )
+
+        return {
+            "ionic_energies": ionic_energies,
+            "forces": forces,
+            "scf_cycles": scf_cycles,
+            "energy_errors": energy_errors,
+            "gradient_errors": gradient_errors,
+            "bfgs_conv": bfgs_conv,
+            "end_bfgs": end_bfgs,
+            "bfgs_summary": bfgs_summary,
+            "final_energy": final_energy,
+            "job_done": job_done,
+            "wall_stop": wall_stop,
+            "stopped": stopped,
+            "explicit_notconv": explicit_notconv,
+            "qe_error": qe_error,
+            "final_coord_begin": final_coord_begin,
+            "final_coord_end": final_coord_end,
+            "atomic_position_blocks": atomic_position_blocks,
+            "cell_blocks": cell_blocks,
+            "stresses": stresses,
+            "timing": timing,
+        }
+
+    def ionic_verdict(r):
+        if r["qe_error"]:
+            return "ERROR"
+
+        if r["bfgs_conv"] or r["end_bfgs"]:
+            return "CONVERGED"
+
+        if r["wall_stop"] or r["stopped"]:
+            return "STOPPED"
+
+        if r["job_done"]:
+            return "INCOMPLETE"
+
+        # Output exists and contains relaxation progress, but QE has
+        # neither terminated nor reported ionic convergence.
+        # This commonly represents a currently active or abruptly
+        # interrupted calculation. Do not call it converged.
+        if r["ionic_energies"] or r["forces"] or r["scf_cycles"]:
+            return "ACTIVE"
+
+        return "UNKNOWN"
+
+    p0 = Path(path)
+
+    if p0.is_file():
+        candidates = [p0]
+
+    elif p0.is_dir():
         candidates = []
 
-        for f in discover_outputs(p):
-            t = read(f)
+        for f in discover_outputs(p0):
+            try:
+                t = read(f)
+            except Exception:
+                continue
 
             if classify_output(f, t) in (
                 "RELAX",
@@ -1098,63 +1431,766 @@ def relax(path=None):
             ):
                 candidates.append(f)
 
+        candidates = sorted(
+            candidates,
+            key=lambda x: x.stat().st_mtime,
+            reverse=True
+        )
+
         if not candidates:
             raise SystemExit(
                 f"No relaxation-like QE output found for: {path}"
             )
 
-        p = candidates[0]
+    else:
+        raise SystemExit(
+            f"No readable relaxation output found for: {path}"
+        )
+
+    if show_list:
+        print("=" * 118)
+        print("QERELAX — RELAXATION CANDIDATES")
+        print("=" * 118)
+
+        print(
+            f"{'#':<4}"
+            f"{'DATE':<18}"
+            f"{'TYPE':<10}"
+            f"{'IONIC':<12}"
+            f"{'FINAL FORCE':<15}"
+            f"{'BEST FORCE':<15}"
+            f"FILE"
+        )
+
+        print("-" * 118)
+
+        for i, f in enumerate(candidates, 1):
+            t = read(f)
+            typ = classify_output(f, t)
+            r = parse_relaxation(t)
+            status = ionic_verdict(r)
+
+            final_force = (
+                f"{r['forces'][-1]:.3e}"
+                if r["forces"]
+                else "—"
+            )
+
+            best_force = (
+                f"{min(r['forces']):.3e}"
+                if r["forces"]
+                else "—"
+            )
+
+            dt = f.stat().st_mtime
+            import datetime
+            datestr = datetime.datetime.fromtimestamp(
+                dt
+            ).strftime("%Y-%m-%d %H:%M")
+
+            print(
+                f"{i:<4}"
+                f"{datestr:<18}"
+                f"{typ:<10}"
+                f"{status:<12}"
+                f"{final_force:<15}"
+                f"{best_force:<15}"
+                f"{f.name}"
+            )
+
+        print("=" * 118)
+        print("Default qerelax selection: newest relaxation candidate.")
+        print(
+            "Use qerelax --best for the strongest completed "
+            "relaxation candidate."
+        )
+        print(
+            "Use qerelax FILE.out to analyze exactly one file."
+        )
+        return
+
+    selection_mode = "explicit"
+
+    if p0.is_dir():
+        if choose_best:
+            converged = []
+
+            for f in candidates:
+                t = read(f)
+                r = parse_relaxation(t)
+
+                if ionic_verdict(r) == "CONVERGED":
+                    final_force = (
+                        r["forces"][-1]
+                        if r["forces"]
+                        else float("inf")
+                    )
+
+                    converged.append(
+                        (final_force, -f.stat().st_mtime, f)
+                    )
+
+            if converged:
+                converged.sort(
+                    key=lambda x: (x[0], x[1])
+                )
+                p = converged[0][2]
+                selection_mode = "best"
+
+            else:
+                print("=" * 94)
+                print("QERELAX — BEST RELAXATION SEARCH")
+                print("=" * 94)
+                print("NO CONVERGED RELAXATION FOUND.")
+                print()
+                print(
+                    "qerelax --best only returns an ionically converged "
+                    "RELAX / VC-RELAX calculation."
+                )
+
+                latest = candidates[0]
+                latest_r = parse_relaxation(read(latest))
+
+                print()
+                print(f"Latest relaxation attempt   : {latest.name}")
+                print(
+                    f"Latest ionic status          : "
+                    f"{ionic_verdict(latest_r)}"
+                )
+
+                incomplete_with_force = []
+
+                for f in candidates:
+                    rr = parse_relaxation(read(f))
+
+                    if rr["forces"]:
+                        incomplete_with_force.append(
+                            (
+                                rr["forces"][-1],
+                                -f.stat().st_mtime,
+                                f,
+                                ionic_verdict(rr),
+                            )
+                        )
+
+                if incomplete_with_force:
+                    incomplete_with_force.sort(
+                        key=lambda x: (x[0], x[1])
+                    )
+
+                    force, _, ff, status = incomplete_with_force[0]
+
+                    print(
+                        f"Lowest final force observed  : "
+                        f"{force:.6e} Ry/Bohr"
+                    )
+                    print(
+                        f"File with lowest final force : {ff.name}"
+                    )
+                    print(
+                        f"Ionic status of that file    : {status}"
+                    )
+
+                print()
+                print(
+                    "Use `qerelax -l` to inspect incomplete attempts, "
+                    "or `qerelax FILE.out` to analyze one explicitly."
+                )
+                print("=" * 94)
+                return
+
+        else:
+            p = candidates[0]
+            selection_mode = "latest"
+
+    else:
+        p = p0
 
     text = read(p)
-    c = output_core(text)
     typ = classify_output(p, text)
+    r = parse_relaxation(text)
+    core = output_core(text)
 
-    print("=" * 80)
-    print("QERELAX — RELAXATION ANALYZER v0.3")
-    print("=" * 80)
+    import datetime
 
+    datestr = datetime.datetime.fromtimestamp(
+        p.stat().st_mtime
+    ).strftime("%Y-%m-%d %H:%M")
+
+    print("=" * 94)
     print(
-        f"File                        : {p.resolve()}"
+        "QERELAX — RESEARCH-GRADE QUANTUM ESPRESSO "
+        "RELAXATION ANALYZER v0.4"
+    )
+    print("=" * 94)
+
+    print(f"File                        : {p.resolve()}")
+    print(f"Calculation classification  : {typ}")
+    print(f"Selection mode              : {selection_mode}")
+    print(f"File modified               : {datestr}")
+
+    # --------------------------------------------------------
+    # BASIC SYSTEM INFORMATION
+    # --------------------------------------------------------
+
+    patterns = {
+        "QE version":
+            r"Program PWSCF v\.([^\s]+)",
+
+        "Atoms":
+            r"number of atoms/cell\s*=\s*(\d+)",
+
+        "Atomic species":
+            r"number of atomic types\s*=\s*(\d+)",
+
+        "Electrons":
+            r"number of electrons\s*=\s*(" + FLOAT + r")",
+
+        "KS states":
+            r"number of Kohn-Sham states\s*=\s*(\d+)",
+
+        "k-points":
+            r"number of k points\s*=\s*(\d+)",
+
+        "ecutwfc":
+            r"kinetic-energy cutoff\s*=\s*(" + FLOAT + r")\s*Ry",
+
+        "ecutrho":
+            r"charge density cutoff\s*=\s*(" + FLOAT + r")\s*Ry",
+    }
+
+    meta = {}
+
+    for key, pat in patterns.items():
+        m = re.search(pat, text, re.I)
+
+        if m:
+            meta[key] = m.group(1)
+
+    print("\nSYSTEM / NUMERICS")
+
+    for key, value in meta.items():
+        print(f"{key:<30}: {value}")
+
+    sm = re.search(
+        r"number of k points=.*?"
+        r"(Marzari-Vanderbilt|Methfessel-Paxton|Gaussian|cold)"
+        r" smearing.*?width \(Ry\)=\s*(" + FLOAT + r")",
+        text,
+        re.I
+    )
+
+    if sm:
+        print(
+            f"{'Smearing':<30}: {sm.group(1)}"
+        )
+        print(
+            f"{'Smearing width':<30}: {sm.group(2)} Ry"
+        )
+
+    # --------------------------------------------------------
+    # IONIC TRAJECTORY
+    # --------------------------------------------------------
+
+    print("\nIONIC RELAXATION")
+
+    nsteps = max(
+        len(r["ionic_energies"]),
+        len(r["forces"])
     )
 
     print(
-        f"Calculation classification  : {typ}"
+        f"{'Parsed ionic configurations':<30}: {nsteps}"
     )
 
-    if c["energies"]:
+    if r["ionic_energies"]:
+        E = r["ionic_energies"]
+
         print(
-            f"Ionic/energy samples        : {len(c['energies'])}"
+            f"{'First ionic energy':<30}: "
+            f"{E[0]:.12f} Ry"
         )
 
         print(
-            f"Last energy                 : {c['energies'][-1]:.12f} Ry"
-        )
-
-    if c["forces"]:
-        print(
-            f"Force samples               : {len(c['forces'])}"
+            f"{'Last ionic energy':<30}: "
+            f"{E[-1]:.12f} Ry"
         )
 
         print(
-            f"Last total force            : {c['forces'][-1]:.6e}"
+            f"{'Overall ΔE':<30}: "
+            f"{E[-1] - E[0]:.6e} Ry"
+        )
+
+        if len(E) >= 2:
+            print(
+                f"{'Last ionic ΔE':<30}: "
+                f"{E[-1] - E[-2]:.6e} Ry"
+            )
+
+        if len(E) >= 5:
+            spread = max(E[-5:]) - min(E[-5:])
+
+            print(
+                f"{'Last-5 energy spread':<30}: "
+                f"{spread:.6e} Ry"
+            )
+
+    if r["final_energy"] is not None:
+        print(
+            f"{'QE final energy':<30}: "
+            f"{r['final_energy']:.12f} Ry"
+        )
+
+    if r["forces"]:
+        F = r["forces"]
+
+        print(
+            f"{'Force samples':<30}: {len(F)}"
         )
 
         print(
-            f"Best total force            : {min(c['forces']):.6e}"
+            f"{'First total force':<30}: "
+            f"{F[0]:.6e} Ry/Bohr"
+        )
+
+        print(
+            f"{'Last total force':<30}: "
+            f"{F[-1]:.6e} Ry/Bohr"
+        )
+
+        print(
+            f"{'Best total force':<30}: "
+            f"{min(F):.6e} Ry/Bohr"
+        )
+
+        if len(F) >= 2:
+            print(
+                f"{'Force change, first → last':<30}: "
+                f"{F[-1] - F[0]:.6e} Ry/Bohr"
+            )
+
+        print(
+            f"{'Recent force behaviour':<30}: "
+            f"{trend(F)}"
+        )
+
+        if len(F) >= 10:
+            recent = F[-10:]
+
+            print(
+                f"{'Last-10 force min / max':<30}: "
+                f"{min(recent):.6e} / "
+                f"{max(recent):.6e} Ry/Bohr"
+            )
+
+    # --------------------------------------------------------
+    # BFGS INTERNAL CONVERGENCE
+    # --------------------------------------------------------
+
+    print("\nBFGS / OPTIMIZER")
+
+    status_line(
+        "BFGS converged marker",
+        "YES" if r["bfgs_conv"] else "NO"
+    )
+
+    status_line(
+        "End of BFGS marker",
+        "YES" if r["end_bfgs"] else "NO"
+    )
+
+    if r["bfgs_summary"]:
+        scf_n, bfgs_n = r["bfgs_summary"][-1]
+
+        print(
+            f"{'QE BFGS summary':<30}: "
+            f"{scf_n} SCF cycles, "
+            f"{bfgs_n} BFGS steps"
+        )
+
+    if r["energy_errors"]:
+        vals = r["energy_errors"]
+
+        print(
+            f"{'Last BFGS energy error':<30}: "
+            f"{vals[-1]:.6e} Ry"
+        )
+
+        print(
+            f"{'Best BFGS energy error':<30}: "
+            f"{min(vals):.6e} Ry"
+        )
+
+    if r["gradient_errors"]:
+        vals = r["gradient_errors"]
+
+        print(
+            f"{'Last BFGS gradient error':<30}: "
+            f"{vals[-1]:.6e} Ry/Bohr"
+        )
+
+        print(
+            f"{'Best BFGS gradient error':<30}: "
+            f"{min(vals):.6e} Ry/Bohr"
+        )
+
+    # --------------------------------------------------------
+    # ELECTRONIC PERFORMANCE DURING RELAXATION
+    # --------------------------------------------------------
+
+    print("\nELECTRONIC SCF INSIDE RELAXATION")
+
+    edetail = relaxation_electronic_detail(text)
+    electronic = edetail["current_status"]
+
+    print(
+        f"{'Completed converged SCFs':<30}: "
+        f"{edetail['n_converged']}"
+    )
+
+    print(
+        f"{'Latest completed SCF':<30}: "
+        f"{edetail['last_completed_status']}"
+    )
+
+    if edetail["last_completed_iterations"] is not None:
+        print(
+            f"{'Latest completed iterations':<30}: "
+            f"{edetail['last_completed_iterations']}"
         )
 
     print(
-        f"Latest electronic SCF       : {latest_electronic_status(text)}"
+        f"{'Current electronic cycle':<30}: "
+        f"{edetail['current_status']}"
+    )
+
+    if r["scf_cycles"]:
+        scfs = r["scf_cycles"]
+
+        print(
+            f"{'Converged SCF cycle records':<30}: "
+            f"{len(scfs)}"
+        )
+
+        print(
+            f"{'Last SCF iterations':<30}: "
+            f"{scfs[-1]}"
+        )
+
+        print(
+            f"{'SCF iteration min / max':<30}: "
+            f"{min(scfs)} / {max(scfs)}"
+        )
+
+        print(
+            f"{'Mean SCF iterations':<30}: "
+            f"{sum(scfs)/len(scfs):.2f}"
+        )
+
+        print(
+            f"{'Total parsed SCF iterations':<30}: "
+            f"{sum(scfs)}"
+        )
+
+    if core.get("acc"):
+        a = core["acc"]
+
+        print(
+            f"{'Best electronic residual':<30}: "
+            f"{min(a):.6e} Ry"
+        )
+
+        print(
+            f"{'Latest electronic residual':<30}: "
+            f"{a[-1]:.6e} Ry"
+        )
+
+    # --------------------------------------------------------
+    # GEOMETRY / CELL EVIDENCE
+    # --------------------------------------------------------
+
+    print("\nGEOMETRY EVIDENCE")
+
+    print(
+        f"{'ATOMIC_POSITIONS blocks':<30}: "
+        f"{r['atomic_position_blocks']}"
     )
 
     print(
-        f"Ionic relaxation            : {ionic_status(text, typ)}"
+        f"{'Final-coordinate begin markers':<30}: "
+        f"{r['final_coord_begin']}"
     )
 
     print(
-        "\nFull research-grade force/geometry analysis "
-        "will be added in the dedicated qerelax upgrade."
+        f"{'Final-coordinate end markers':<30}: "
+        f"{r['final_coord_end']}"
     )
+
+    if typ == "VC-RELAX":
+        print(
+            f"{'CELL_PARAMETERS blocks':<30}: "
+            f"{r['cell_blocks']}"
+        )
+
+        if r["stresses"]:
+            print(
+                f"{'Last total stress':<30}: "
+                f"{r['stresses'][-1]:.6e} Ry/Bohr^3"
+            )
+
+    # --------------------------------------------------------
+    # SANITY DIAGNOSTICS
+    # --------------------------------------------------------
+
+    print("\nSCIENTIFIC SANITY")
+
+    if core.get("neg"):
+        nrho = core["neg"]
+
+        print(
+            f"{'negative rho min / max':<30}: "
+            f"{min(nrho):.3e} / {max(nrho):.3e}"
+        )
+
+    else:
+        print(
+            f"{'negative rho':<30}: not reported"
+        )
+
+    eigwarn = [
+        int(x)
+        for x in re.findall(
+            r"(\d+)\s+eigenvalues? not converged",
+            text,
+            re.I
+        )
+    ]
+
+    if eigwarn:
+        print(
+            f"{'Eigenvector warning lines':<30}: "
+            f"{len(eigwarn)}"
+        )
+
+        print(
+            f"{'Max unconverged eigenvals':<30}: "
+            f"{max(eigwarn)}"
+        )
+
+    else:
+        print(
+            f"{'Eigenvector warnings':<30}: none parsed"
+        )
+
+    # --------------------------------------------------------
+    # PERFORMANCE
+    # --------------------------------------------------------
+
+    if r["timing"]:
+        print("\nPERFORMANCE")
+        print(r["timing"].strip())
+
+    # --------------------------------------------------------
+    # TERMINATION
+    # --------------------------------------------------------
+
+    print("\nTERMINATION EVIDENCE")
+
+    status_line(
+        "JOB DONE marker",
+        "YES" if r["job_done"] else "NO"
+    )
+
+    status_line(
+        "Wall-time limit reached",
+        "YES" if r["wall_stop"] else "NO"
+    )
+
+    status_line(
+        "Calculation stopped marker",
+        "YES" if r["stopped"] else "NO"
+    )
+
+    status_line(
+        "Explicit SCF non-convergence",
+        "YES" if r["explicit_notconv"] else "NO"
+    )
+
+    if r["qe_error"]:
+        status_line(
+            "QE runtime error",
+            "YES",
+            f"Error in routine {r['qe_error'].group(1)}"
+        )
+    else:
+        status_line(
+            "QE runtime error",
+            "NO"
+        )
+
+    # --------------------------------------------------------
+    # ASSESSMENT
+    # --------------------------------------------------------
+
+    ionic = ionic_verdict(r)
+
+    print("\nASSESSMENT")
+
+    execution = (
+        "FAIL"
+        if r["qe_error"]
+        else (
+            "PASS"
+            if r["job_done"]
+            else "UNKNOWN"
+        )
+    )
+
+    status_line(
+        "Execution integrity",
+        execution
+    )
+
+    status_line(
+        "Electronic SCF health",
+        electronic
+    )
+
+    if ionic == "CONVERGED":
+        status_line(
+            "Ionic relaxation",
+            "CONVERGED",
+            "QE BFGS convergence established"
+        )
+
+    elif ionic == "STOPPED":
+        status_line(
+            "Ionic relaxation",
+            "INCOMPLETE",
+            "calculation stopped before BFGS convergence"
+        )
+
+    elif ionic == "ERROR":
+        status_line(
+            "Ionic relaxation",
+            "FAIL",
+            "QE runtime error"
+        )
+
+    elif ionic == "ACTIVE":
+        status_line(
+            "Ionic relaxation",
+            "ACTIVE / UNTERMINATED",
+            "relaxation progress exists, but no ionic convergence or termination marker yet"
+        )
+
+    else:
+        status_line(
+            "Ionic relaxation",
+            "UNPROVEN",
+            "no BFGS convergence marker found"
+        )
+
+    if r["forces"]:
+        ftrend = trend(r["forces"])
+
+        status_line(
+            "Force trajectory",
+            "INFO",
+            ftrend
+        )
+
+    if core.get("neg"):
+        mx = max(core["neg"])
+
+        status_line(
+            "Negative-rho diagnostic",
+            "WARNING" if mx >= 0.1 else "INFO",
+            f"max={mx:.3e}"
+        )
+
+    if eigwarn:
+        status_line(
+            "Diagonalization sanity",
+            "WARNING",
+            "unconverged eigenvalues reported"
+        )
+
+    else:
+        status_line(
+            "Diagonalization sanity",
+            "PASS"
+        )
+
+    # --------------------------------------------------------
+    # RESEARCH DECISION
+    # --------------------------------------------------------
+
+    print("\nRESEARCH DECISION")
+
+    if r["qe_error"]:
+        print(
+            "FAIL — Quantum ESPRESSO encountered a runtime error. "
+            "Do not use this structure as a final relaxed geometry."
+        )
+
+    elif ionic == "CONVERGED":
+        print(
+            "RELAXATION CONVERGED — QE explicitly reports successful "
+            "BFGS geometry optimization."
+        )
+
+        if electronic != "CONVERGED":
+            print(
+                "CAUTION — inspect the electronic SCF status of the "
+                "final ionic step before production post-processing."
+            )
+
+    elif ionic == "STOPPED":
+        print(
+            "RELAXATION INCOMPLETE — the run stopped before ionic "
+            "BFGS convergence. Continue/restart from the latest valid "
+            "geometry rather than treating it as final."
+        )
+
+    elif ionic == "ACTIVE":
+        print(
+            "RELAXATION ACTIVE / UNTERMINATED — valid relaxation progress "
+            "is present, but QE has not reported ionic convergence or a "
+            "termination condition. Do not treat the current geometry as "
+            "the final relaxed structure."
+        )
+
+    else:
+        print(
+            "RELAXATION UNPROVEN — no explicit ionic-convergence "
+            "evidence was found. Inspect/restart before using the "
+            "geometry as a final relaxed structure."
+        )
+
+    print("\nNEXT USEFUL COMMANDS")
+
+    print(
+        "  qerelax -l        # list relaxation candidates"
+    )
+
+    print(
+        "  qerelax --best    # strongest converged relaxation"
+    )
+
+    print(
+        "  qehistory         # full SCF + relaxation history"
+    )
+
+    print(
+        "  qescf --best      # strongest final SCF"
+    )
+
+    print(
+        "  qecheck .         # directory/input/restart integrity"
+    )
+
+    print("=" * 94)
 
 
 # ============================================================
