@@ -2254,18 +2254,66 @@ Explicit file:
 # ============================================================
 
 def history(path=None):
+    """
+    Research-grade chronological Quantum ESPRESSO calculation history.
+
+    Usage:
+        qehistory
+        qehistory DIRECTORY
+        qehistory FILE.out
+        qehistory --help
+
+    The history view distinguishes:
+      - SCF versus structural-relaxation calculations
+      - completed versus interrupted electronic SCF cycles
+      - ionic convergence versus stopped/unterminated relaxations
+      - newest attempt versus strongest converged result
+    """
+
     args = sys.argv[1:]
 
     if path is None:
-        path = args[0] if args else "."
+        path = "."
+
+    if args:
+        if args[0] in ("-h", "--help"):
+            print("""
+Usage:
+  qehistory
+  qehistory DIRECTORY
+  qehistory FILE.out
+  qehistory --help
+
+Purpose:
+  Show Quantum ESPRESSO calculation history chronologically.
+
+For SCF calculations:
+  reports convergence status and residual quality.
+
+For RELAX / VC-RELAX calculations:
+  distinguishes ionic convergence from electronic SCF state and separates
+  completed electronic cycles from a possibly unfinished final cycle.
+
+The summary identifies:
+  latest SCF attempt
+  best converged SCF
+  latest relaxation
+  latest converged relaxation
+""".strip())
+            return
+
+        path = args[0]
 
     p = Path(path)
 
     files = discover_outputs(p)
 
-    print("=" * 132)
-    print("QEHISTORY — QUANTUM ESPRESSO CALCULATION HISTORY v0.3")
-    print("=" * 132)
+    print("=" * 154)
+    print(
+        "QEHISTORY — RESEARCH-GRADE QUANTUM ESPRESSO "
+        "CALCULATION HISTORY v0.7"
+    )
+    print("=" * 154)
 
     if not files:
         print(
@@ -2273,68 +2321,155 @@ def history(path=None):
         )
         return
 
-    # chronological ordering is much easier for restart history
+    # Chronological ordering is most useful for restart chains.
     files = sorted(
         files,
         key=lambda x: x.stat().st_mtime,
     )
+
+    def history_relax_status(text0, calc_type):
+        """
+        More explicit relaxation status for history display.
+
+        This intentionally distinguishes an unterminated file from a
+        calculation that QE explicitly stopped.
+        """
+
+        flags = termination_flags(text0)
+
+        if flags["error"]:
+            return "ERROR"
+
+        ion = ionic_status(
+            text0,
+            calc_type,
+        )
+
+        if ion == "CONVERGED":
+            return "RELAX CONV"
+
+        if ion == "STOPPED / INCOMPLETE":
+            return "RELAX STOP"
+
+        # No convergence and no explicit stop/error.
+        core0 = output_core(text0)
+
+        if (
+            core0.get("energies")
+            or core0.get("forces")
+            or core0.get("iters")
+        ):
+            if not flags["jobdone"]:
+                return "UNTERMINATED"
+
+        if flags["jobdone"]:
+            return "RELAX INCOMP"
+
+        return "UNKNOWN"
+
+    def electronic_history_status(text0, calc_type):
+        """
+        For relaxation histories, show the state of the latest completed
+        electronic SCF separately from a possibly unfinished current cycle.
+        """
+
+        if calc_type in ("RELAX", "VC-RELAX"):
+            detail = relaxation_electronic_detail(
+                text0
+            )
+
+            return (
+                detail["last_completed_status"],
+                detail["current_status"],
+                detail["n_converged"],
+            )
+
+        status = latest_electronic_status(
+            text0
+        )
+
+        nconv = len(
+            re.findall(
+                r"convergence has been achieved in\s+\d+\s+iterations",
+                text0,
+                re.I,
+            )
+        )
+
+        return (
+            status,
+            status,
+            nconv,
+        )
 
     print(
         f"{'DATE':<18}"
         f"{'TYPE':<10}"
         f"{'BEST SCF':<13}"
         f"{'LAST SCF':<13}"
-        f"{'ELECTRONIC':<14}"
-        f"{'OVERALL':<14}"
+        f"{'LAST DONE':<13}"
+        f"{'CURRENT':<13}"
+        f"{'OVERALL':<15}"
         f"FILE"
     )
 
-    print("-" * 132)
+    print("-" * 154)
 
     rows = []
 
     for f in files:
         try:
-            text = read(f)
+            text0 = read(f)
         except Exception:
             continue
 
         typ = classify_output(
             f,
-            text,
+            text0,
         )
 
-        c = output_core(text)
+        core = output_core(
+            text0
+        )
 
         best = (
-            min(c["acc"])
-            if c["acc"]
+            min(core["acc"])
+            if core["acc"]
             else None
         )
 
         last = (
-            c["acc"][-1]
-            if c["acc"]
+            core["acc"][-1]
+            if core["acc"]
             else None
         )
 
-        electronic = latest_electronic_status(
-            text
-        )
-
-        overall = summary_status(
-            text,
+        last_done, current, nconv = electronic_history_status(
+            text0,
             typ,
         )
+
+        if typ in ("RELAX", "VC-RELAX"):
+            overall = history_relax_status(
+                text0,
+                typ,
+            )
+        else:
+            overall = summary_status(
+                text0,
+                typ,
+            )
 
         rows.append(
             {
                 "file": f,
-                "text": text,
+                "text": text0,
                 "type": typ,
                 "best": best,
                 "last": last,
-                "electronic": electronic,
+                "last_done": last_done,
+                "current": current,
+                "nconv": nconv,
                 "overall": overall,
             }
         )
@@ -2344,18 +2479,19 @@ def history(path=None):
             f"{typ:<10}"
             f"{fmt_float(best):<13}"
             f"{fmt_float(last):<13}"
-            f"{electronic:<14}"
-            f"{overall:<14}"
+            f"{last_done:<13}"
+            f"{current:<13}"
+            f"{overall:<15}"
             f"{f.name}"
         )
 
-    # --------------------------------------------------------
-    # SMART SUMMARY
-    # --------------------------------------------------------
+    # ========================================================
+    # HISTORY SUMMARY
+    # ========================================================
 
-    print("\n" + "=" * 132)
+    print("\n" + "=" * 154)
     print("HISTORY SUMMARY")
-    print("=" * 132)
+    print("=" * 154)
 
     scf_rows = [
         r
@@ -2378,19 +2514,39 @@ def history(path=None):
         )
     ]
 
+    converged_relax = [
+        r
+        for r in relax_rows
+        if r["overall"] == "RELAX CONV"
+    ]
+
     if scf_rows:
         latest_scf = max(
             scf_rows,
             key=lambda r:
-            r["file"].stat().st_mtime,
+                r["file"].stat().st_mtime,
         )
 
         print(
-            f"Latest SCF attempt           : {latest_scf['file'].name}"
+            f"{'Latest SCF attempt':<32}: "
+            f"{latest_scf['file'].name}"
         )
 
         print(
-            f"Latest SCF status            : {latest_scf['overall']}"
+            f"{'Latest SCF status':<32}: "
+            f"{latest_scf['overall']}"
+        )
+
+        print(
+            f"{'Latest SCF residual':<32}: "
+            f"{fmt_float(latest_scf['last'])} Ry"
+        )
+
+    else:
+        latest_scf = None
+
+        print(
+            f"{'Latest SCF attempt':<32}: none detected"
         )
 
     if converged_scfs:
@@ -2399,59 +2555,161 @@ def history(path=None):
             key=lambda r: (
                 r["best"]
                 if r["best"] is not None
-                else float("inf")
+                else float("inf"),
+                -r["file"].stat().st_mtime,
             ),
         )
 
         print(
-            f"Best converged SCF          : {best_scf['file'].name}"
+            f"{'Best converged SCF':<32}: "
+            f"{best_scf['file'].name}"
         )
 
         print(
-            f"Best converged residual     : {fmt_float(best_scf['best'])} Ry"
+            f"{'Best converged residual':<32}: "
+            f"{fmt_float(best_scf['best'])} Ry"
         )
 
     else:
+        best_scf = None
+
         print(
-            "Best converged SCF          : none detected"
+            f"{'Best converged SCF':<32}: none detected"
         )
 
     if relax_rows:
         latest_relax = max(
             relax_rows,
             key=lambda r:
-            r["file"].stat().st_mtime,
+                r["file"].stat().st_mtime,
         )
 
         print(
-            f"Latest relaxation           : {latest_relax['file'].name}"
+            f"{'Latest relaxation':<32}: "
+            f"{latest_relax['file'].name}"
         )
 
         print(
-            f"Latest relaxation status    : {latest_relax['overall']}"
+            f"{'Latest relaxation status':<32}: "
+            f"{latest_relax['overall']}"
         )
 
         print(
-            f"Latest relax electronic SCF : {latest_relax['electronic']}"
+            f"{'Latest completed relax SCF':<32}: "
+            f"{latest_relax['last_done']}"
         )
+
+        print(
+            f"{'Current relax SCF cycle':<32}: "
+            f"{latest_relax['current']}"
+        )
+
+        print(
+            f"{'Completed SCFs in latest relax':<32}: "
+            f"{latest_relax['nconv']}"
+        )
+
+    else:
+        latest_relax = None
+
+        print(
+            f"{'Latest relaxation':<32}: none detected"
+        )
+
+    if converged_relax:
+        latest_conv_relax = max(
+            converged_relax,
+            key=lambda r:
+                r["file"].stat().st_mtime,
+        )
+
+        print(
+            f"{'Latest converged relaxation':<32}: "
+            f"{latest_conv_relax['file'].name}"
+        )
+
+    else:
+        latest_conv_relax = None
+
+        print(
+            f"{'Latest converged relaxation':<32}: none detected"
+        )
+
+    # ========================================================
+    # RESEARCH STATE
+    # ========================================================
+
+    print("\nRESEARCH STATE")
+
+    if latest_scf is not None:
+        if latest_scf["overall"] == "CONVERGED":
+            print(
+                "Latest standalone SCF result  : usable as electronically "
+                "converged evidence, subject to input/physical validation."
+            )
+        else:
+            print(
+                "Latest standalone SCF result  : not established as a "
+                "converged final SCF."
+            )
+
+    if latest_relax is not None:
+        if latest_relax["overall"] == "RELAX CONV":
+            print(
+                "Latest structural relaxation  : ionically converged."
+            )
+
+        elif latest_relax["overall"] == "RELAX STOP":
+            print(
+                "Latest structural relaxation  : stopped before ionic "
+                "convergence; do not treat the final geometry as relaxed."
+            )
+
+        elif latest_relax["overall"] == "UNTERMINATED":
+            print(
+                "Latest structural relaxation  : output is unterminated; "
+                "from the output alone it is not proven finished."
+            )
+
+        else:
+            print(
+                "Latest structural relaxation  : final ionic state is "
+                "not proven."
+            )
 
     print("\nRECOMMENDED COMMANDS")
 
     print(
-        "  qescf -l"
+        "  qescf -l             # standalone SCF attempts"
     )
 
     print(
-        "  qescf --best"
+        "  qescf --best         # strongest converged standalone SCF"
     )
 
-    if converged_scfs:
+    print(
+        "  qerelax -l           # relaxation/restart attempts"
+    )
+
+    print(
+        "  qerelax --best       # strongest converged relaxation"
+    )
+
+    if best_scf is not None:
         print(
             f"  qescf {best_scf['file'].name}"
         )
 
-    print("=" * 132)
+    if latest_conv_relax is not None:
+        print(
+            f"  qerelax {latest_conv_relax['file'].name}"
+        )
 
+    print(
+        "  qecheck .            # input/restart/script integrity"
+    )
+
+    print("=" * 154)
 
 # ============================================================
 # QECOMPARE
