@@ -238,8 +238,8 @@ def classify_output(path, text=None):
     Priority:
       1. Explicit relaxation / variable-cell evidence in QE output
       2. Strong NSCF / bands filename evidence
-      3. Standard PWSCF SCF evidence
-      4. Conservative filename fallback
+      3. Conservative relaxation filename fallback
+      4. Standard PWSCF SCF evidence
       5. UNKNOWN
 
     Parent-directory names are never used for classification.
@@ -296,6 +296,26 @@ def classify_output(path, text=None):
         return "BANDS"
 
     # --------------------------------------------------------
+    # Conservative relaxation filename fallback
+    # --------------------------------------------------------
+    # Some truncated/early relaxation outputs may contain normal PWSCF
+    # electronic iterations but never reach the BFGS markers. In those
+    # cases use only explicit calculation-style relaxation tokens.
+    #
+    # Do NOT match generic words such as "relaxed", "pre_relaxed",
+    # "post_relaxed", etc.
+
+    if (
+        re.search(r"(^|[_\-.])relax([_\-.]|$)", name)
+        or re.search(r"(^|[_\-.])vc-relax([_\-.]|$)", name)
+        or re.search(r"(^|[_\-.])rx([_\-.]|$)", name)
+    ):
+        if "vc-relax" in name:
+            return "VC-RELAX"
+
+        return "RELAX"
+
+    # --------------------------------------------------------
     # Standard electronic PWSCF evidence
     # --------------------------------------------------------
 
@@ -308,22 +328,6 @@ def classify_output(path, text=None):
         )
     ):
         return "SCF"
-
-    # --------------------------------------------------------
-    # Conservative filename fallback
-    # --------------------------------------------------------
-    # Only accept explicit calculation-style relaxation tokens.
-    # Do NOT match "relaxed", "pre_relaxed", "post_relaxed", etc.
-
-    if (
-        re.search(r"(^|[_\-.])relax([_\-.]|$)", name)
-        or re.search(r"(^|[_\-.])vc-relax([_\-.]|$)", name)
-        or re.search(r"(^|[_\-.])rx([_\-.]|$)", name)
-    ):
-        if "vc-relax" in name:
-            return "VC-RELAX"
-
-        return "RELAX"
 
     return "UNKNOWN"
 
