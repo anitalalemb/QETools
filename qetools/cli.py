@@ -2457,10 +2457,57 @@ def history(path=None):
 # QECOMPARE
 # ============================================================
 
+
 def compare(a=None, b=None):
+    """
+    Research-grade side-by-side Quantum ESPRESSO comparison.
+
+    Usage:
+        qecompare A.out B.out
+        qecompare --help
+
+    The comparison distinguishes:
+      - calculation/input differences,
+      - numerical/electronic convergence,
+      - relaxation behaviour,
+      - scientific diagnostics,
+      - performance evidence.
+
+    It reports associations only. It does not infer that a changed
+    parameter caused an observed change in convergence or physics.
+    """
+
     args = sys.argv[1:]
 
     if a is None or b is None:
+        if args and args[0] in ("-h", "--help"):
+            print("""
+Usage:
+  qecompare A.out B.out
+  qecompare --help
+
+Purpose:
+  Compare two Quantum ESPRESSO calculations side by side.
+
+Included:
+  calculation type and status
+  system size and numerical settings
+  matching input-file settings when available
+  SCF residual history
+  total energies
+  forces / relaxation convergence
+  negative-rho diagnostics
+  unconverged eigenvalue warnings
+  termination evidence
+  QE timing information
+
+Important:
+  qecompare reports differences and numerical outcomes.
+  It does NOT claim that a changed setting caused a change in convergence
+  or physical behaviour.
+""".strip())
+            return
+
         if len(args) != 2:
             raise SystemExit(
                 "Usage: qecompare A.out B.out"
@@ -2473,81 +2520,1199 @@ def compare(a=None, b=None):
 
     if not pa.is_file():
         raise SystemExit(
-            f"File not found: {a}"
+            f"File A not found: {a}"
         )
 
     if not pb.is_file():
         raise SystemExit(
-            f"File not found: {b}"
+            f"File B not found: {b}"
         )
 
     ta = read(pa)
     tb = read(pb)
 
+    if not is_qe_output(pa):
+        raise SystemExit(
+            f"File A does not look like a Quantum ESPRESSO output: {pa}"
+        )
+
+    if not is_qe_output(pb):
+        raise SystemExit(
+            f"File B does not look like a Quantum ESPRESSO output: {pb}"
+        )
+
     ca = output_core(ta)
     cb = output_core(tb)
 
-    print("=" * 90)
-    print("QECOMPARE")
-    print("=" * 90)
+    type_a = classify_output(pa, ta)
+    type_b = classify_output(pb, tb)
 
-    for label, va, vb in [
-        (
-            "Best residual",
-            min(ca["acc"])
-            if ca["acc"]
-            else None,
-            min(cb["acc"])
-            if cb["acc"]
-            else None,
-        ),
-        (
-            "Last residual",
-            ca["acc"][-1]
-            if ca["acc"]
-            else None,
-            cb["acc"][-1]
-            if cb["acc"]
-            else None,
-        ),
-        (
-            "Last energy",
-            ca["energies"][-1]
-            if ca["energies"]
-            else None,
-            cb["energies"][-1]
-            if cb["energies"]
-            else None,
-        ),
-    ]:
+    status_a = summary_status(ta, type_a)
+    status_b = summary_status(tb, type_b)
+
+    # --------------------------------------------------------
+    # LOCAL HELPERS
+    # --------------------------------------------------------
+
+    def first_match(text0, pattern, cast=None):
+        m = re.search(pattern, text0, re.I | re.S)
+
+        if not m:
+            return None
+
+        value = m.group(1)
+
+        if cast is None:
+            return value
+
+        try:
+            return cast(value)
+        except Exception:
+            return value
+
+    def ffloat(x):
+        if x is None:
+            return "—"
+
+        try:
+            return f"{float(x):.6e}"
+        except Exception:
+            return str(x)
+
+    def fplain(x):
+        return "—" if x is None else str(x)
+
+    def same_value(x, y):
+        if x is None and y is None:
+            return True
+
+        if x is None or y is None:
+            return False
+
+        try:
+            return math.isclose(
+                float(x),
+                float(y),
+                rel_tol=1e-10,
+                abs_tol=1e-12,
+            )
+        except Exception:
+            return str(x).strip().lower() == str(y).strip().lower()
+
+    def row(label, va, vb, width=31):
+        atext = fplain(va)
+        btext = fplain(vb)
+
+        # Keep ordinary values in a compact two-column table.
+        # For long strings/paths/timing lines, print A and B separately
+        # so values can never visually run together.
+        if len(atext) > 34 or len(btext) > 34:
+            print(f"{label:<{width}}")
+            print(f"  A: {atext}")
+            print(f"  B: {btext}")
+        else:
+            print(
+                f"{label:<{width}}"
+                f"{atext:<36}"
+                f"{btext}"
+            )
+
+    def scirow(label, va, vb, unit=""):
+        aa = ffloat(va)
+        bb = ffloat(vb)
+
+        if unit:
+            if va is not None:
+                aa += f" {unit}"
+            if vb is not None:
+                bb += f" {unit}"
+
+        row(label, aa, bb)
+
+    def output_metadata(text0):
+        meta = {}
+
+        patterns = {
+            "QE version":
+                r"Program PWSCF v\.([^\s]+)",
+
+            "Atoms":
+                r"number of atoms/cell\s*=\s*(\d+)",
+
+            "Atomic species":
+                r"number of atomic types\s*=\s*(\d+)",
+
+            "Electrons":
+                r"number of electrons\s*=\s*(" + FLOAT + r")",
+
+            "KS states":
+                r"number of Kohn-Sham states\s*=\s*(\d+)",
+
+            "k-points":
+                r"number of k points\s*=\s*(\d+)",
+
+            "ecutwfc":
+                r"kinetic-energy cutoff\s*=\s*(" + FLOAT + r")\s*Ry",
+
+            "ecutrho":
+                r"charge density cutoff\s*=\s*(" + FLOAT + r")\s*Ry",
+        }
+
+        for key, pat in patterns.items():
+            m = re.search(pat, text0, re.I)
+
+            if m:
+                meta[key] = m.group(1)
+
+        sm = re.search(
+            r"(Marzari-Vanderbilt|Methfessel-Paxton|Gaussian|cold)"
+            r" smearing.*?width \(Ry\)\s*=\s*("
+            + FLOAT
+            + r")",
+            text0,
+            re.I | re.S,
+        )
+
+        if sm:
+            meta["smearing"] = sm.group(1)
+            meta["degauss"] = sm.group(2)
+
+        return meta
+
+    def matching_input(output_path):
+        """
+        Prefer an exact same-stem .in file.
+
+        Examples:
+          scf_test.out -> scf_test.in
+          relax_restart4.out -> relax_restart4.in
+
+        If no exact sidecar exists, do not guess aggressively.
+        """
+        exact = output_path.with_suffix(".in")
+
+        if exact.is_file():
+            return exact
+
+        return None
+
+    def input_settings(output_path):
+        inp = matching_input(output_path)
+
+        if inp is None:
+            return None, {}
+
+        try:
+            return inp, parse_qe_input_settings(
+                read(inp)
+            )
+        except Exception:
+            return inp, {}
+
+    def electronic_metrics(text0, core):
+        conv = re.findall(
+            r"convergence has been achieved in\s+(\d+)\s+iterations",
+            text0,
+            re.I,
+        )
+
+        eig = [
+            int(x)
+            for x in re.findall(
+                r"(\d+)\s+eigenvalues? not converged",
+                text0,
+                re.I,
+            )
+        ]
+
+        timing = last_or(
+            re.findall(
+                r"(?m)^.*PWSCF.*WALL.*$",
+                text0
+            )
+        )
+
+        return {
+            "best_residual":
+                min(core["acc"]) if core["acc"] else None,
+
+            "last_residual":
+                core["acc"][-1] if core["acc"] else None,
+
+            "residual_samples":
+                len(core["acc"]),
+
+            "residual_trend":
+                trend(core["acc"]) if core["acc"] else "—",
+
+            "highest_iteration":
+                max(core["iters"]) if core["iters"] else None,
+
+            "converged_cycles":
+                len(conv),
+
+            "last_converged_iterations":
+                int(conv[-1]) if conv else None,
+
+            "last_energy":
+                core["energies"][-1]
+                if core["energies"]
+                else None,
+
+            "energy_samples":
+                len(core["energies"]),
+
+            "last_force":
+                core["forces"][-1]
+                if core.get("forces")
+                else None,
+
+            "best_force":
+                min(core["forces"])
+                if core.get("forces")
+                else None,
+
+            "force_samples":
+                len(core.get("forces", [])),
+
+            "negative_rho_max":
+                max(core["neg"])
+                if core["neg"]
+                else None,
+
+            "eigen_warning_lines":
+                len(eig),
+
+            "max_unconverged_eigenvalues":
+                max(eig) if eig else 0,
+
+            "charge_wrong":
+                bool(
+                    re.search(
+                        r"charge is wrong",
+                        text0,
+                        re.I,
+                    )
+                ),
+
+            "job_done":
+                "JOB DONE." in text0,
+
+            "wall_stop":
+                bool(
+                    re.search(
+                        r"Maximum CPU time exceeded",
+                        text0,
+                        re.I,
+                    )
+                ),
+
+            "calculation_stopped":
+                bool(
+                    re.search(
+                        r"Calculation stopped",
+                        text0,
+                        re.I,
+                    )
+                ),
+
+            "qe_error":
+                bool(
+                    re.search(
+                        r"Error in routine",
+                        text0,
+                        re.I,
+                    )
+                ),
+
+            "bfgs_converged":
+                bool(
+                    re.search(
+                        r"\bbfgs converged\b|"
+                        r"End of BFGS Geometry Optimization",
+                        text0,
+                        re.I,
+                    )
+                ),
+
+            "timing":
+                timing.strip() if timing else None,
+        }
+
+    ma = output_metadata(ta)
+    mb = output_metadata(tb)
+
+    ia_file, ia = input_settings(pa)
+    ib_file, ib = input_settings(pb)
+
+    ea = electronic_metrics(ta, ca)
+    eb = electronic_metrics(tb, cb)
+
+    # --------------------------------------------------------
+    # HEADER
+    # --------------------------------------------------------
+
+    print("=" * 112)
+    print(
+        "QECOMPARE — RESEARCH-GRADE QUANTUM ESPRESSO "
+        "COMPARISON v0.6"
+    )
+    print("=" * 112)
+
+    print(f"A : {pa.resolve()}")
+    print(f"B : {pb.resolve()}")
+
+    print(
+        f"Input A : "
+        f"{ia_file.name if ia_file else 'not found automatically'}"
+    )
+
+    print(
+        f"Input B : "
+        f"{ib_file.name if ib_file else 'not found automatically'}"
+    )
+
+    print(
+        f"\n{'QUANTITY':<31}"
+        f"{'A':<28}"
+        f"B"
+    )
+
+    print("-" * 112)
+
+    # --------------------------------------------------------
+    # CALCULATION IDENTITY
+    # --------------------------------------------------------
+
+    print("\nCALCULATION IDENTITY / STATUS")
+
+    row("Calculation type", type_a, type_b)
+    row("Overall status", status_a, status_b)
+    row("File modified", fmt_time(pa), fmt_time(pb))
+    row("QE version", ma.get("QE version"), mb.get("QE version"))
+
+    # --------------------------------------------------------
+    # SYSTEM / NUMERICS
+    # --------------------------------------------------------
+
+    print("\nSYSTEM / NUMERICS")
+
+    for key in (
+        "Atoms",
+        "Atomic species",
+        "Electrons",
+        "KS states",
+        "k-points",
+        "ecutwfc",
+        "ecutrho",
+        "smearing",
+        "degauss",
+    ):
+        va = ma.get(key)
+        vb = mb.get(key)
+
+        if key in ("ecutwfc", "ecutrho", "degauss"):
+            scirow(
+                key,
+                dfloat(va) if va is not None else None,
+                dfloat(vb) if vb is not None else None,
+                "Ry",
+            )
+        else:
+            row(key, va, vb)
+
+    # --------------------------------------------------------
+    # INPUT SETTINGS
+    # --------------------------------------------------------
+
+    print("\nINPUT SETTINGS")
+
+    if not ia and not ib:
         print(
-            f"{label:<24}: "
-            f"{va}    |    {vb}"
+            "No exact same-stem .in files were found for either output."
+        )
+
+    input_keys = (
+        "calculation",
+        "prefix",
+        "outdir",
+        "pseudo_dir",
+        "nat",
+        "ntyp",
+        "nbnd",
+        "occupations",
+        "smearing",
+        "degauss",
+        "ecutwfc",
+        "ecutrho",
+        "conv_thr",
+        "etot_conv_thr",
+        "forc_conv_thr",
+        "electron_maxstep",
+        "diagonalization",
+        "mixing_beta",
+        "mixing_mode",
+        "restart_mode",
+        "startingwfc",
+        "startingpot",
+        "max_seconds",
+    )
+
+    changed_settings = []
+
+    operational_keys = {
+        "outdir",
+        "pseudo_dir",
+        "prefix",
+        "max_seconds",
+    }
+
+    scientific_changed_settings = []
+
+    for key in input_keys:
+        va = ia.get(key)
+        vb = ib.get(key)
+
+        if va is None and vb is None:
+            continue
+
+        marker = ""
+
+        if not same_value(va, vb):
+            marker = "  <-- DIFFERENT"
+            changed_settings.append(
+                (key, va, vb)
+            )
+
+            if key not in operational_keys:
+                scientific_changed_settings.append(
+                    (key, va, vb)
+                )
+
+        atext = fplain(va)
+        btext = fplain(vb)
+
+        if len(atext) > 34 or len(btext) > 34:
+            print(f"{key:<31}{marker}")
+            print(f"  A: {atext}")
+            print(f"  B: {btext}")
+        else:
+            print(
+                f"{key:<31}"
+                f"{atext:<36}"
+                f"{btext}"
+                f"{marker}"
+            )
+
+    # --------------------------------------------------------
+    # ELECTRONIC CONVERGENCE
+    # --------------------------------------------------------
+
+    print("\nELECTRONIC CONVERGENCE")
+
+    scirow(
+        "Best SCF residual",
+        ea["best_residual"],
+        eb["best_residual"],
+        "Ry",
+    )
+
+    scirow(
+        "Last SCF residual",
+        ea["last_residual"],
+        eb["last_residual"],
+        "Ry",
+    )
+
+    row(
+        "Residual samples",
+        ea["residual_samples"],
+        eb["residual_samples"],
+    )
+
+    row(
+        "Recent residual trend",
+        ea["residual_trend"],
+        eb["residual_trend"],
+    )
+
+    row(
+        "Highest iteration #",
+        ea["highest_iteration"],
+        eb["highest_iteration"],
+    )
+
+    row(
+        "Converged SCF records",
+        ea["converged_cycles"],
+        eb["converged_cycles"],
+    )
+
+    row(
+        "Last converged iterations",
+        ea["last_converged_iterations"],
+        eb["last_converged_iterations"],
+    )
+
+    # --------------------------------------------------------
+    # ENERGY
+    # --------------------------------------------------------
+
+    print("\nENERGY")
+
+    scirow(
+        "Last total energy",
+        ea["last_energy"],
+        eb["last_energy"],
+        "Ry",
+    )
+
+    row(
+        "Energy samples",
+        ea["energy_samples"],
+        eb["energy_samples"],
+    )
+
+    energy_difference = None
+
+    if (
+        ea["last_energy"] is not None
+        and eb["last_energy"] is not None
+    ):
+        energy_difference = (
+            eb["last_energy"]
+            - ea["last_energy"]
+        )
+
+        print(
+            f"{'ΔE = E(B) - E(A)':<31}"
+            f"{energy_difference:.8e} Ry"
+        )
+
+    same_system = (
+        same_value(ma.get("Atoms"), mb.get("Atoms"))
+        and same_value(ma.get("Electrons"), mb.get("Electrons"))
+    )
+
+    comparability_checks = []
+
+    def add_compare_check(label, va, vb, required=True):
+        same = same_value(va, vb)
+
+        comparability_checks.append(
+            {
+                "label": label,
+                "a": va,
+                "b": vb,
+                "same": same,
+                "required": required,
+            }
+        )
+
+    add_compare_check(
+        "Calculation type",
+        type_a,
+        type_b,
+        required=True,
+    )
+
+    add_compare_check(
+        "Atoms",
+        ma.get("Atoms"),
+        mb.get("Atoms"),
+        required=True,
+    )
+
+    add_compare_check(
+        "Electrons",
+        ma.get("Electrons"),
+        mb.get("Electrons"),
+        required=True,
+    )
+
+    add_compare_check(
+        "ecutwfc",
+        ma.get("ecutwfc"),
+        mb.get("ecutwfc"),
+        required=True,
+    )
+
+    add_compare_check(
+        "ecutrho",
+        ma.get("ecutrho"),
+        mb.get("ecutrho"),
+        required=True,
+    )
+
+    add_compare_check(
+        "k-points",
+        ma.get("k-points"),
+        mb.get("k-points"),
+        required=True,
+    )
+
+    add_compare_check(
+        "occupations",
+        ia.get("occupations"),
+        ib.get("occupations"),
+        required=False,
+    )
+
+    add_compare_check(
+        "smearing",
+        ia.get("smearing") or ma.get("smearing"),
+        ib.get("smearing") or mb.get("smearing"),
+        required=False,
+    )
+
+    add_compare_check(
+        "degauss",
+        ia.get("degauss") or ma.get("degauss"),
+        ib.get("degauss") or mb.get("degauss"),
+        required=False,
+    )
+
+    required_known = all(
+        item["a"] is not None and item["b"] is not None
+        for item in comparability_checks
+        if item["required"]
+    )
+
+    required_same = all(
+        item["same"]
+        for item in comparability_checks
+        if item["required"]
+    )
+
+    converged_labels = {
+        "CONVERGED",
+        "RELAX CONV",
+    }
+
+    both_completed_converged = (
+        status_a in converged_labels
+        and status_b in converged_labels
+    )
+
+    # Passing these checks means the raw energies are numerically
+    # comparable at the parsed level. It still does NOT prove a fully
+    # controlled physical relative-energy comparison because geometry,
+    # pseudopotential identity/content and XC functional are not yet
+    # completely verified here.
+    energy_numerically_comparable = (
+        required_known
+        and required_same
+        and both_completed_converged
+    )
+
+    # Be deliberately conservative: physical ΔE is not certified until
+    # the stronger Hamiltonian/structure identity checks are implemented.
+    energy_physically_comparable = False
+
+    print("\nPHYSICAL COMPARABILITY")
+
+    print(
+        f"{'Criterion':<31}"
+        f"{'A':<36}"
+        f"{'B':<36}"
+        f"Result"
+    )
+
+    print("-" * 118)
+
+    comparability_rows = [
+        (
+            "Calculation type",
+            type_a,
+            type_b,
+        ),
+        (
+            "Atoms",
+            ma.get("Atoms"),
+            mb.get("Atoms"),
+        ),
+        (
+            "Electrons",
+            ma.get("Electrons"),
+            mb.get("Electrons"),
+        ),
+        (
+            "ecutwfc",
+            ma.get("ecutwfc"),
+            mb.get("ecutwfc"),
+        ),
+        (
+            "ecutrho",
+            ma.get("ecutrho"),
+            mb.get("ecutrho"),
+        ),
+        (
+            "k-points",
+            ma.get("k-points"),
+            mb.get("k-points"),
+        ),
+        (
+            "occupations",
+            ia.get("occupations") or ma.get("occupations"),
+            ib.get("occupations") or mb.get("occupations"),
+        ),
+        (
+            "smearing",
+            ia.get("smearing") or ma.get("smearing"),
+            ib.get("smearing") or mb.get("smearing"),
+        ),
+        (
+            "degauss",
+            ia.get("degauss") or ma.get("degauss"),
+            ib.get("degauss") or mb.get("degauss"),
+        ),
+    ]
+
+    comparability_results = {}
+
+    for label, va, vb in comparability_rows:
+        if va is None and vb is None:
+            result = "UNKNOWN"
+
+        elif va is None or vb is None:
+            result = "UNKNOWN"
+
+        elif same_value(va, vb):
+            result = "SAME"
+
+        else:
+            result = "DIFFERENT"
+
+        comparability_results[label] = result
+
+        print(
+            f"{label:<31}"
+            f"{fplain(va):<36}"
+            f"{fplain(vb):<36}"
+            f"{result}"
+        )
+
+    print()
+
+    converged_labels = {
+        "CONVERGED",
+        "RELAX CONV",
+    }
+
+    both_completed_converged = (
+        status_a in converged_labels
+        and status_b in converged_labels
+    )
+
+    if both_completed_converged:
+        print(
+            f"{'Final-energy comparison':<31}: "
+            "NUMERICALLY AVAILABLE"
+        )
+    else:
+        print(
+            f"{'Final-energy comparison':<31}: "
+            "NOT VALID AS FINAL ENERGIES"
+        )
+
+        unconverged = []
+
+        if status_a not in converged_labels:
+            unconverged.append(
+                f"A ({status_a})"
+            )
+
+        if status_b not in converged_labels:
+            unconverged.append(
+                f"B ({status_b})"
+            )
+
+        print(
+            f"{'Reason':<31}: "
+            + ", ".join(unconverged)
+            + " is not explicitly converged/completed."
+        )
+
+    required_same = (
+        "Calculation type",
+        "Atoms",
+        "Electrons",
+        "ecutwfc",
+        "ecutrho",
+        "k-points",
+        "occupations",
+    )
+
+    core_comparable = all(
+        comparability_results.get(key) == "SAME"
+        for key in required_same
+    )
+
+    if core_comparable:
+        print(
+            f"{'Core numerical setup':<31}: CONSISTENT"
+        )
+    else:
+        print(
+            f"{'Core numerical setup':<31}: NOT FULLY CONSISTENT"
         )
 
     print(
-        f"Type A                  : {classify_output(pa, ta)}"
+        f"{'Physical relative-energy ΔE':<31}: NOT CERTIFIED"
     )
 
     print(
-        f"Type B                  : {classify_output(pb, tb)}"
+        f"{'Reason':<31}: geometry, pseudopotentials and XC equivalence "
+        "are not yet fully proven by qecompare."
     )
 
-    print(
-        f"Status A                : {summary_status(ta, classify_output(pa, ta))}"
+    if energy_difference is not None:
+        print(
+            f"{'Energy interpretation':<31}: displayed ΔE is a raw "
+            "numerical difference unless full physical comparability "
+            "is independently established."
+        )
+
+    # --------------------------------------------------------
+    # RELAXATION / FORCES
+    # --------------------------------------------------------
+
+    if (
+        type_a in ("RELAX", "VC-RELAX")
+        or type_b in ("RELAX", "VC-RELAX")
+    ):
+        print("\nRELAXATION / FORCES")
+
+        row(
+            "BFGS converged",
+            "YES" if ea["bfgs_converged"] else "NO",
+            "YES" if eb["bfgs_converged"] else "NO",
+        )
+
+        scirow(
+            "Last total force",
+            ea["last_force"],
+            eb["last_force"],
+            "Ry/Bohr",
+        )
+
+        scirow(
+            "Best total force",
+            ea["best_force"],
+            eb["best_force"],
+            "Ry/Bohr",
+        )
+
+        row(
+            "Force samples",
+            ea["force_samples"],
+            eb["force_samples"],
+        )
+
+    elif ea["force_samples"] or eb["force_samples"]:
+        print("\nFORCES REPORTED BY SCF")
+        print(
+            "These are force diagnostics printed during SCF calculations; "
+            "they do not imply that an ionic relaxation was performed."
+        )
+
+        scirow(
+            "Last reported force",
+            ea["last_force"],
+            eb["last_force"],
+            "Ry/Bohr",
+        )
+
+        row(
+            "Force records",
+            ea["force_samples"],
+            eb["force_samples"],
+        )
+
+    # --------------------------------------------------------
+    # SCIENTIFIC SANITY
+    # --------------------------------------------------------
+
+    print("\nSCIENTIFIC SANITY")
+
+    scirow(
+        "negative rho max",
+        ea["negative_rho_max"],
+        eb["negative_rho_max"],
     )
 
-    print(
-        f"Status B                : {summary_status(tb, classify_output(pb, tb))}"
+    row(
+        "Eigenvalue warning lines",
+        ea["eigen_warning_lines"],
+        eb["eigen_warning_lines"],
     )
 
-    print(
-        f"A                       : {pa}"
+    row(
+        "Max unconverged eigenvals",
+        ea["max_unconverged_eigenvalues"],
+        eb["max_unconverged_eigenvalues"],
     )
 
-    print(
-        f"B                       : {pb}"
+    row(
+        "Charge-is-wrong warning",
+        "YES" if ea["charge_wrong"] else "NO",
+        "YES" if eb["charge_wrong"] else "NO",
     )
+
+    # --------------------------------------------------------
+    # TERMINATION
+    # --------------------------------------------------------
+
+    print("\nTERMINATION EVIDENCE")
+
+    row(
+        "JOB DONE",
+        "YES" if ea["job_done"] else "NO",
+        "YES" if eb["job_done"] else "NO",
+    )
+
+    row(
+        "Wall-time stop",
+        "YES" if ea["wall_stop"] else "NO",
+        "YES" if eb["wall_stop"] else "NO",
+    )
+
+    row(
+        "Calculation stopped",
+        "YES" if ea["calculation_stopped"] else "NO",
+        "YES" if eb["calculation_stopped"] else "NO",
+    )
+
+    row(
+        "QE runtime error",
+        "YES" if ea["qe_error"] else "NO",
+        "YES" if eb["qe_error"] else "NO",
+    )
+
+    # --------------------------------------------------------
+    # PERFORMANCE
+    # --------------------------------------------------------
+
+    print("\nPERFORMANCE")
+
+    row(
+        "PWSCF timing",
+        ea["timing"],
+        eb["timing"],
+    )
+
+    # --------------------------------------------------------
+    # DIFFERENCE SUMMARY
+    # --------------------------------------------------------
+
+    print("\n" + "=" * 112)
+    print("DIFFERENCE SUMMARY")
+    print("=" * 112)
+
+    if changed_settings:
+        operational_keys = {
+            "outdir",
+            "prefix",
+            "pseudo_dir",
+            "max_seconds",
+        }
+
+        scientific_changes = [
+            (key, va, vb)
+            for key, va, vb in changed_settings
+            if key not in operational_keys
+        ]
+
+        operational_changes = [
+            (key, va, vb)
+            for key, va, vb in changed_settings
+            if key in operational_keys
+        ]
+
+        if scientific_changes:
+            print("SCIENTIFIC / NUMERICAL DIFFERENCES")
+
+            for key, va, vb in scientific_changes:
+                print(
+                    f"  {key:<20}: "
+                    f"{fplain(va)}  ->  {fplain(vb)}"
+                )
+
+        else:
+            print("SCIENTIFIC / NUMERICAL DIFFERENCES")
+            print("  none detected")
+
+        if operational_changes:
+            print("\nOPERATIONAL / PATH DIFFERENCES")
+
+            for key, va, vb in operational_changes:
+                print(
+                    f"  {key:<20}: "
+                    f"{fplain(va)}  ->  {fplain(vb)}"
+                )
+
+    elif ia and ib:
+        print(
+            "No differences were detected among the parsed input settings."
+        )
+
+    else:
+        print(
+            "Input-setting comparison is incomplete because an exact "
+            "same-stem input file was not available for both outputs."
+        )
+
+    # --------------------------------------------------------
+    # NUMERICAL OUTCOME
+    # --------------------------------------------------------
+
+    print("\nNUMERICAL OUTCOME")
+
+    converged_labels = {
+        "CONVERGED",
+        "RELAX CONV",
+    }
+
+    a_conv = status_a in converged_labels
+    b_conv = status_b in converged_labels
+
+    if a_conv and not b_conv:
+        print(
+            "A has the stronger completion/convergence outcome: "
+            f"A={status_a}, B={status_b}."
+        )
+
+    elif b_conv and not a_conv:
+        print(
+            "B has the stronger completion/convergence outcome: "
+            f"A={status_a}, B={status_b}."
+        )
+
+    elif a_conv and b_conv:
+        print(
+            "Both calculations reached an explicitly converged/completed state."
+        )
+
+        if (
+            type_a == "SCF"
+            and type_b == "SCF"
+            and ea["last_residual"] is not None
+            and eb["last_residual"] is not None
+        ):
+            if ea["last_residual"] < eb["last_residual"]:
+                print(
+                    "A ended with the smaller parsed SCF residual."
+                )
+            elif eb["last_residual"] < ea["last_residual"]:
+                print(
+                    "B ended with the smaller parsed SCF residual."
+                )
+            else:
+                print(
+                    "The parsed final SCF residuals are equal."
+                )
+
+        if (
+            type_a in ("RELAX", "VC-RELAX")
+            and type_b in ("RELAX", "VC-RELAX")
+            and ea["last_force"] is not None
+            and eb["last_force"] is not None
+        ):
+            if ea["last_force"] < eb["last_force"]:
+                print(
+                    "A ended with the smaller parsed total force."
+                )
+            elif eb["last_force"] < ea["last_force"]:
+                print(
+                    "B ended with the smaller parsed total force."
+                )
+            else:
+                print(
+                    "The parsed final total forces are equal."
+                )
+
+    else:
+        print(
+            "Neither calculation provides a stronger explicitly converged "
+            "final outcome based on the parsed QE status."
+        )
+
+    # --------------------------------------------------------
+    # RESEARCH INTERPRETATION
+    # --------------------------------------------------------
+
+    print("\nRESEARCH INTERPRETATION")
+
+    if changed_settings:
+        print(
+            "The calculations differ in one or more parsed input settings "
+            "listed above."
+        )
+
+        print(
+            "Any difference in convergence rate, residuals, energy, forces "
+            "or runtime is therefore associated with those changed settings "
+            "and/or other differences between the calculations."
+        )
+
+        print(
+            "This two-run comparison alone does NOT establish that any one "
+            "changed parameter caused the observed numerical behaviour."
+        )
+
+        if len(scientific_changed_settings) > 1:
+            print(
+                "Because multiple scientific/numerical settings changed, "
+                "individual causal effects cannot be isolated from this pair alone."
+            )
+        elif len(scientific_changed_settings) == 1:
+            key, va, vb = scientific_changed_settings[0]
+            print(
+                f"Only one parsed scientific/numerical setting differs: "
+                f"{key} ({fplain(va)} -> {fplain(vb)})."
+            )
+            print(
+                "This is a cleaner controlled comparison, although a two-run "
+                "comparison by itself still does not prove causality."
+            )
+
+        operational_differences = [
+            item for item in changed_settings
+            if item[0] in operational_keys
+        ]
+
+        if operational_differences:
+            print(
+                "Operational/path differences were also detected but are not "
+                "treated as changes to the physical Hamiltonian."
+            )
+
+    else:
+        print(
+            "No parsed input-setting change was established from the available "
+            "sidecar inputs."
+        )
+
+    if type_a != type_b:
+        print(
+            "CAUTION: the two files have different calculation classifications "
+            f"({type_a} vs {type_b}); some numerical metrics are not directly "
+            "equivalent."
+        )
+
+    if not same_system:
+        print(
+            "CAUTION: system-size/electron-count evidence differs, so total "
+            "energies should not be treated as directly comparable physical "
+            "relative energies."
+        )
+
+    print("\nUSEFUL NEXT COMMANDS")
+    print(f"  qescf {pa}    # detailed A analysis if A is SCF-like")
+    print(f"  qescf {pb}    # detailed B analysis if B is SCF-like")
+    print("  qehistory      # inspect chronology in the current directory")
+    print("  qecheck .      # inspect inputs/restarts/scripts")
+    print("=" * 112)
 
 
 # ============================================================
