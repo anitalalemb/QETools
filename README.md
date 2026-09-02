@@ -5,7 +5,7 @@ Research-oriented Quantum ESPRESSO analysis toolkit for short, memorable NERSC c
 
 ## Current commands
 
-- `qescf` — research-grade SCF analyzer
+- `qescf` —  SCF analyzer
 - `qerelax` — basic relaxation analyzer; research-grade upgrade next
 - `qehistory` — summarize repeated/restarted outputs
 - `qecheck` — basic directory/input integrity
