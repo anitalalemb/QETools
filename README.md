@@ -3,7 +3,7 @@
 
 Research-oriented Quantum ESPRESSO analysis toolkit for short, memorable NERSC commands.
 
-## Current commands
+## Commands
 
 - `qescf` —  SCF analyzer
 - `qerelax` — basic relaxation analyzer; research-grade upgrade next
