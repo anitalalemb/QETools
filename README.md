@@ -6,7 +6,10 @@ QETools helps you inspect calculation outputs, understand convergence, and compa
 The goal is a reusable toolkit for workstations and clusters, with optional tools for moiré materials and defects.
 
 **Status:** early development. Scientific validation is in progress.
-The code on `main` and the local upgrade are different. Planned features are listed separately below.
+The code on `main` and the [draft upgrade](https://github.com/anitalalemb/QETools/pull/1) are different. Planned features are listed separately below.
+
+The first audit found 8 failures in 19 targeted checks of the published code.
+The proposed fixes pass 38 automated tests. See the [validation report](https://github.com/anitalalemb/QETools/blob/improve-portable-reports/docs/VALIDATION.md) for evidence and remaining limits.
 
 ## Start here
 
@@ -24,7 +27,7 @@ python3 -m qetools.cli compare A.out B.out
 ```
 
 These commands read existing files. They do not submit calculations.
-The current `main` has an empty `pyproject.toml`. Installation through pip is being repaired in the local upgrade.
+The current `main` has an empty `pyproject.toml`. Installation through pip is being repaired in the draft upgrade.
 For now, use the module commands above from the repository. They preserve all arguments.
 
 ## Available analysis
@@ -53,7 +56,7 @@ The default and `--best` can select the same file.
 “Newest” means the file timestamp. It does not prove that the file is the final calculation.
 
 **Current main:** `--best` uses the smallest residual anywhere in each run.
-**Local upgrade:** it uses the final residual and requires completion evidence.
+**Draft upgrade:** it uses the final residual and requires completion evidence.
 Neither ranking proves that different structures or numerical settings are physically comparable.
 If no candidate converged, a selected file remains unconverged.
 
