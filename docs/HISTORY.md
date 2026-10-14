@@ -22,14 +22,28 @@ The selected converged SCF uses final printed accuracy, then newest modification
 
 ## Validation: 14 October 2026
 
-All 87 local tests pass. Fourteen dedicated history tests cover the exact heading, incomplete/failed/restarted cycles, zero versus missing estimates, UTC timestamps, filename ties, and identical alias output for files/directories with spaces and help. Added cases cover missing estimates in a new cycle, convergence followed by a runtime error, and original source lines in appended runs. Existing scientific tests cover SCF selection agreement and EXX relaxation guards.
+All 90 local tests pass. Seventeen dedicated history tests cover the exact heading, incomplete/failed/restarted cycles, zero versus missing estimates, UTC timestamps, filename ties, and identical alias output for files/directories with spaces and help. Added cases cover missing estimates in a new cycle, convergence followed by a runtime error, and original source lines in appended runs. Existing scientific tests cover SCF selection agreement and EXX relaxation guards.
 
 An independent line reader (`tools/validate_history.py`) matches all 280 electronic-evidence and overall-verdict checks on 35 unique local PWSCF logs. It checks minimum/last/latest-cycle estimates with source lines and cycle IDs, last convergence outcome, latest cycle ID/state and converged-cycle counts. It requires explicit cycle banners. Overall verdict checks are bounded to the declared SCF/fixed-cell BFGS corpus. It does not independently validate generic classification or file dates. Broader calculation types and hybrid/runtime edge cases remain open. The supplied theta18 table cannot be independently verified without its original output files and metadata. The NERSC v0.7 installation has not been changed or inspected.
 
 ## Type and failure limits
 
-History exposes the classification source and warnings when filenames or incomplete SCF evidence determine the type. For an explicit input association, use `qetools inspect FILE.out --input FILE.in`. History does not yet accept an input mapping. Identical energies or estimates do not establish duplicate files or equivalent settings.
+History exposes the classification source and warnings when filenames or incomplete SCF evidence determine the type. For an explicit input association, use `qetools inspect FILE.out --input FILE.in`. For a single output, history also accepts `qehis FILE.out --input FILE.in`. Directory input mappings remain planned. Identical energies or estimates do not establish duplicate files or equivalent settings.
 
 Runtime errors take priority over EXX assessment. Explicit stops remain stopped even after electronic convergence or JOB DONE. Types outside SCF/RELAX/VC-RELAX are NOT ASSESSED unless an explicit error or stop is found. BFGS convergence alone cannot certify completion without a converged latest electronic state and normal execution ending.
 
 Five additional tests cover failure priority, stops, unsupported types, incomplete ionic completion and exposed filename uncertainty. Original theta18 rows, real hybrid/magnetic cases and generic type validation remain open.
+
+## Explicit input and JSON reports
+
+```sh
+qehis calculation.out --input calculation.in
+qehis calculation.out --input calculation.in --json
+qehis . --json
+```
+
+Input association is declared by the user, not independently proven. Conflicts remain UNKNOWN. Directory-wide `--input` is rejected to prevent one input from being silently attached to unrelated outputs.
+
+JSON schema 1.0 contains `records`, each with the common `report`, `history_evidence`, `history_status`, `modified_utc` and modification-time description. History evidence preserves original source lines, minimum/last/latest-cycle estimates in Ry and convergence outcomes. Unsupported programs have no PWSCF history evidence. The common report retains execution and scientific status separately; `history_status` is the table verdict.
+
+Three added tests check explicit input provenance, conflicting types and rejected directory associations. Alias tests also cover input paths with spaces and JSON output.

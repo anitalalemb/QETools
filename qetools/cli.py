@@ -2128,7 +2128,7 @@ Explicit file:
 # QEHISTORY
 # ============================================================
 
-def history(path=None):
+def history(path=None, input_path=None):
     """
     Research-grade chronological Quantum ESPRESSO calculation history.
 
@@ -2225,7 +2225,11 @@ The summary identifies:
             continue
 
         from qetools.calculations import identify
-        identity = identify(f, text0)
+        settings = None
+        if input_path is not None:
+            from qetools.inputs import parse_namelists
+            settings = parse_namelists(Path(input_path).read_text(errors="replace"))["control"]
+        identity = identify(f, text0, settings)
         typ = identity["calculation"]
 
         core = output_core(
@@ -2289,6 +2293,8 @@ The summary identifies:
             print(f"  {row['file'].name}: {row['identity']['source']}")
             for warning in row["identity"]["warnings"]:
                 print(f"    {warning.replace('supply --input', 'inspect with --input').replace('Supply --input', 'Inspect with --input')}")
+    if input_path is not None:
+        print(f"\nInput association: {Path(input_path).resolve()} (declared by user; not independently proven)")
     print("NOT ASSESSED: this history view does not validate this calculation type.")
 
     print("\nMODIFIED UTC: file modification time; copying a file can change its order.")

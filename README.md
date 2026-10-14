@@ -101,3 +101,12 @@ Bands, PDOS, structural/τ tools and `qeall` are planned. Their older wrappers a
 ```sh
 python3 -m unittest discover -s tests -v
 ```
+
+History can also use a declared input and export evidence:
+
+```sh
+qehis calculation.out --input calculation.in
+qehis . --json
+```
+
+See [history columns and validation](docs/HISTORY.md) for cycle meanings and limits.

@@ -128,6 +128,43 @@ def output_command(command, argv):
             show(report)
 
 
+def history_command(argv):
+    parser = argparse.ArgumentParser(prog='qehis', description='QE calculation history with explicit type and cycle evidence.')
+    parser.add_argument('path', nargs='?', default='.')
+    parser.add_argument('--input', type=Path, help='explicit PWSCF input association; requires one output file')
+    parser.add_argument('--json', action='store_true', help='history records with source lines, hashes and units')
+    args = parser.parse_args(argv)
+    target = Path(args.path)
+    if not target.exists():
+        parser.error(f'path does not exist: {target}')
+    if args.input and not target.is_file():
+        parser.error('--input requires one explicit output file')
+    if args.json:
+        from datetime import datetime, timezone
+        from .history import evidence, overall_status
+        rows = []
+        files = sorted(cli.discover_outputs(target), key=lambda f: (f.stat().st_mtime, str(f)))
+        for path in files:
+            report = analyze(path, input_path=args.input)
+            raw = path.read_text(errors='replace')
+            details = evidence(raw) if report['program'] in (None, 'PWSCF') else None
+            rows.append({'report': report, 'history_evidence': details,
+                         'history_status': overall_status(raw, report['calculation']),
+                         'modified_utc': datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
+                         'modified_time_source': 'filesystem modification time; not calculation time'})
+        print(json.dumps({'schema_version': '1.0', 'report_kind': 'history', 'records': rows}, indent=2, allow_nan=False))
+        return
+    # Validate the declared association before printing the table.
+    if args.input:
+        analyze(target, input_path=args.input)
+    old = sys.argv
+    sys.argv = ['qehis']
+    try:
+        cli.history(target, input_path=args.input)
+    finally:
+        sys.argv = old
+
+
 def check_command(argv):
     parser = argparse.ArgumentParser(prog='qecheck', description='Check input, files and optional launch scripts.')
     parser.add_argument('path', nargs='?', default='.')
@@ -166,6 +203,8 @@ def main(argv=None):
     try:
         if parsed.command in ('scf', 'relax', 'inspect'):
             output_command(parsed.command, rest)
+        elif parsed.command == 'history':
+            history_command(rest)
         elif parsed.command == 'check':
             check_command(rest)
         elif parsed.command == 'compare':

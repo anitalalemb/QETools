@@ -51,7 +51,8 @@ class HistoryTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix='qe history ') as tmp:
             p = Path(tmp, 'scf test.out'); p.write_text(HEADER + CYCLE + 'JOB DONE.\n')
-            for args in ([str(p)], [tmp], ['--help']):
+            inp = Path(tmp, 'scf input.in'); inp.write_text("&CONTROL calculation='scf' /\n")
+            for args in ([str(p)], [tmp], ['--help'], [str(p), '--input', str(inp)], [str(p), '--input', str(inp), '--json']):
                 results = [subprocess.run(['sh', str(root/'bin'/name), *args], capture_output=True, text=True, check=True).stdout for name in ('qehis', 'qehistory')]
                 self.assertEqual(results[0], results[1])
 
@@ -110,3 +111,36 @@ class HistoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp, 'relax.out'); p.write_text(HEADER + CYCLE)
             self.assertIn('filename fallback', self.report(p))
+
+    def test_explicit_input_and_json_provenance(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp, 'scheduler.out'); p.write_text(HEADER + CYCLE + 'JOB DONE.\n')
+            inp = Path(tmp, 'calculation.in'); inp.write_text("&CONTROL calculation='nscf' /\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                main(['history', str(p), '--input', str(inp), '--json'])
+            row = json.loads(out.getvalue())['records'][0]
+            self.assertEqual(row['report']['calculation'], 'NSCF')
+            self.assertEqual(row['history_status'], 'NOT ASSESSED')
+            self.assertEqual(row['history_evidence']['last_estimate']['source_line'], 3)
+            self.assertEqual(row['report']['provenance']['input']['file'], str(inp.resolve()))
+            self.assertTrue(row['modified_utc'].endswith('+00:00'))
+
+    def test_input_directory_association_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                main(['history', tmp, '--input', str(Path(tmp, 'input.in'))])
+
+    def test_declared_input_conflict_remains_unassessed(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp, 'relax.out'); p.write_text(HEADER + CYCLE + 'bfgs converged\nJOB DONE.\n')
+            inp = Path(tmp, 'scf.in'); inp.write_text("&CONTROL calculation='scf' /\n")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                main(['history', str(p), '--input', str(inp), '--json'])
+            row = json.loads(out.getvalue())['records'][0]
+            self.assertEqual(row['report']['calculation'], 'UNKNOWN')
+            self.assertEqual(row['history_status'], 'NOT ASSESSED')
+            self.assertIn('conflict', row['report']['classification_source'])
