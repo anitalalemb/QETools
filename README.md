@@ -31,11 +31,11 @@ The toolkit has no third-party runtime dependencies.
 | --- | --- |
 | `qescf FILE` | SCF completion, convergence, energy and accuracy estimate |
 | `qerelax FILE` | Electronic and ionic/BFGS convergence, energy and total force |
-| `qehistory DIRECTORY` | Attempts and restarts in chronological order |
+| `qehis DIRECTORY` | Attempts and restarts in chronological order |
 | `qecheck INPUT.in` | Input, path, pseudopotential and restart-file checks |
 | `qecompare A.out B.out` | Settings and numerical differences between two outputs |
 
-`qehis` is an alias for `qehistory`. The same commands are available through
+`qehis` is the recommended short command; `qehistory` remains an equivalent alias. The same commands are available through
 `qetools scf`, `qetools relax`, `qetools history`, `qetools check` and `qetools compare`.
 Use `--help` for options.
 
@@ -64,7 +64,7 @@ qescf scf.out --input scf.in
 qerelax relax.out
 qerelax relax.out --input relax.in --steps --json
 qetools inspect calculation.out --input calculation.in --json
-qehistory .
+qehis .
 qecheck .
 qecheck . --verbose
 qecompare A.out B.out

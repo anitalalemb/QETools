@@ -198,7 +198,7 @@ class InterfaceContracts(unittest.TestCase):
             buf=io.StringIO()
             with contextlib.redirect_stdout(buf):
                 main(['history',tmp])
-            match=next(line for line in buf.getvalue().splitlines() if line.startswith('Best converged SCF'))
+            match=next(line for line in buf.getvalue().splitlines() if line.startswith('Selected converged SCF'))
             self.assertIn(Path(selected['file']).name,match)
 
     def test_identical_residual_and_timestamp_use_filename_tie_break(self):

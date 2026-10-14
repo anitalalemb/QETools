@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 import sys
 import math
@@ -536,7 +536,7 @@ def list_scf_candidates(path="."):
 
     print(
         f"{'#':<4}"
-        f"{'DATE':<18}"
+        f"{'MODIFIED UTC':<21}"
         f"{'STATUS':<14}"
         f"{'BEST':<13}"
         f"{'LAST':<13}"
@@ -1054,7 +1054,7 @@ Explicit file:
     )
 
     print(
-        "  qehistory         # inspect all QE outputs in this folder"
+        "  qehis         # inspect all QE outputs in this folder"
     )
 
     print(
@@ -1362,7 +1362,7 @@ Explicit file:
 
         candidates = sorted(
             candidates,
-            key=lambda x: x.stat().st_mtime,
+            key=lambda x: (x.stat().st_mtime, str(x)),
             reverse=True
         )
 
@@ -1383,7 +1383,7 @@ Explicit file:
 
         print(
             f"{'#':<4}"
-            f"{'DATE':<18}"
+            f"{'MODIFIED UTC':<21}"
             f"{'TYPE':<10}"
             f"{'IONIC':<12}"
             f"{'FINAL FORCE':<15}"
@@ -2110,7 +2110,7 @@ Explicit file:
     )
 
     print(
-        "  qehistory         # full SCF + relaxation history"
+        "  qehis         # full SCF + relaxation history"
     )
 
     print(
@@ -2133,10 +2133,10 @@ def history(path=None):
     Research-grade chronological Quantum ESPRESSO calculation history.
 
     Usage:
-        qehistory
-        qehistory DIRECTORY
-        qehistory FILE.out
-        qehistory --help
+        qehis
+        qehis DIRECTORY
+        qehis FILE.out
+        qehis --help
 
     The history view distinguishes:
       - SCF versus structural-relaxation calculations
@@ -2154,10 +2154,10 @@ def history(path=None):
         if args[0] in ("-h", "--help"):
             print("""
 Usage:
-  qehistory
-  qehistory DIRECTORY
-  qehistory FILE.out
-  qehistory --help
+  qehis
+  qehis DIRECTORY
+  qehis FILE.out
+  qehis --help
 
 Purpose:
   Show Quantum ESPRESSO calculation history chronologically.
@@ -2185,8 +2185,7 @@ The summary identifies:
 
     print("=" * 154)
     print(
-        "QEHISTORY — QUANTUM ESPRESSO "
-        "CALCULATION HISTORY"
+        "QE CALCULATION HISTORY"
     )
     print("=" * 154)
 
@@ -2199,7 +2198,7 @@ The summary identifies:
     # Chronological ordering is most useful for restart chains.
     files = sorted(
         files,
-        key=lambda x: x.stat().st_mtime,
+        key=lambda x: (x.stat().st_mtime, str(x)),
     )
 
     def history_relax_status(text0, calc_type):
@@ -2246,47 +2245,22 @@ The summary identifies:
         return "UNKNOWN"
 
     def electronic_history_status(text0, calc_type):
-        """
-        For relaxation histories, show the state of the latest completed
-        electronic SCF separately from a possibly unfinished current cycle.
-        """
-
-        if calc_type in ("RELAX", "VC-RELAX"):
-            detail = relaxation_electronic_detail(
-                text0
-            )
-
-            return (
-                detail["last_completed_status"],
-                detail["current_status"],
-                detail["n_converged"],
-            )
-
-        status = latest_electronic_status(
-            text0
-        )
-
-        nconv = len(
-            re.findall(
-                r"convergence has been achieved in\s+\d+\s+iterations",
-                text0,
-                re.I,
-            )
-        )
-
+        from qetools.records import parse_cycles
+        cycles = parse_cycles(text0)["cycles"]
+        ended = [c for c in cycles if c["status"] in ("CONVERGED", "NOT CONVERGED")]
         return (
-            status,
-            status,
-            nconv,
+            ended[-1]["status"] if ended else "NONE",
+            cycles[-1]["status"] if cycles else "UNKNOWN",
+            sum(c["status"] == "CONVERGED" for c in cycles),
         )
 
     print(
-        f"{'DATE':<18}"
+        f"{'MODIFIED UTC':<21}"
         f"{'TYPE':<10}"
-        f"{'BEST SCF':<13}"
-        f"{'LAST SCF':<13}"
-        f"{'LAST DONE':<13}"
-        f"{'CURRENT':<13}"
+        f"{'MIN EST (Ry)':<13}"
+        f"{'LAST EST (Ry)':<14}"
+        f"{'LAST ENDED':<15}"
+        f"{'LATEST CYCLE':<15}"
         f"{'OVERALL':<15}"
         f"FILE"
     )
@@ -2353,15 +2327,22 @@ The summary identifies:
         )
 
         print(
-            f"{fmt_time(f):<18}"
+            f"{datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).strftime('%Y-%m-%d %H:%M:%S'):<21}"
             f"{typ:<10}"
             f"{fmt_float(best):<13}"
-            f"{fmt_float(last):<13}"
-            f"{last_done:<13}"
-            f"{current:<13}"
+            f"{fmt_float(last):<14}"
+            f"{last_done:<15}"
+            f"{current:<15}"
             f"{overall:<15}"
             f"{f.name}"
         )
+
+    print("\nMODIFIED UTC: file modification time; copying a file can change its order.")
+    print("MIN/LAST EST: minimum/last printed SCF accuracy estimate in the latest run, in Ry.")
+    print("LAST EST may belong to an earlier cycle; it is not necessarily the latest cycle's estimate.")
+    print("LAST ENDED: last cycle with a convergence outcome; NONE means no such outcome.")
+    print("LATEST CYCLE: last electronic cycle in the output; this does not establish a live process.")
+    print("— means no printed value. Electronic convergence does not prove ionic convergence.")
 
     # ========================================================
     # HISTORY SUMMARY
@@ -2435,11 +2416,12 @@ The summary identifies:
                 if r["last"] is not None
                 else float("inf"),
                 -r["file"].stat().st_mtime,
+                str(r["file"]),
             ),
         )
 
         print(
-            f"{'Best converged SCF':<32}: "
+            f"{'Selected converged SCF':<32}: "
             f"{best_scf['file'].name}"
         )
 
@@ -2452,7 +2434,7 @@ The summary identifies:
         best_scf = None
 
         print(
-            f"{'Best converged SCF':<32}: none detected"
+            f"{'Selected converged SCF':<32}: none detected"
         )
 
     if relax_rows:
@@ -3845,7 +3827,7 @@ Important:
     print("\nUSEFUL NEXT COMMANDS")
     print(f"  qescf {pa}    # detailed A analysis if A is SCF-like")
     print(f"  qescf {pb}    # detailed B analysis if B is SCF-like")
-    print("  qehistory      # inspect chronology in the current directory")
+    print("  qehis      # inspect chronology in the current directory")
     print("  qecheck .      # inspect inputs/restarts/scripts")
     print("=" * 112)
 
@@ -5329,7 +5311,7 @@ Explicit input:
         "  qerelax -l               # relaxation candidates/results"
     )
     print(
-        "  qehistory                # chronological QE calculation history"
+        "  qehis                # chronological QE calculation history"
     )
 
     print("=" * 100)
@@ -5376,7 +5358,7 @@ Usage:
 
     elif cmd == "history":
         old = sys.argv
-        sys.argv = ["qehistory"] + args
+        sys.argv = ["qehis"] + args
 
         try:
             history()
