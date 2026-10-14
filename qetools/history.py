@@ -29,3 +29,21 @@ def evidence(raw):
             'latest_cycle_id': latest['cycle_id'] if latest else None,
             'latest_cycle_status': latest['status'] if latest else 'UNKNOWN',
             'converged_cycles': sum(c['status'] == 'CONVERGED' for c in ended)}
+
+
+def overall_status(text, calculation):
+    """History verdicts retain explicit failures before applying scope limits."""
+    from . import cli
+    flags = cli.termination_flags(text)
+    if flags['error']:
+        return 'ERROR'
+    if flags['wall_stop'] or flags['stopped']:
+        return 'RELAX STOP' if calculation in ('RELAX', 'VC-RELAX') else 'STOPPED'
+    if calculation not in ('SCF', 'RELAX', 'VC-RELAX'):
+        return 'NOT ASSESSED'
+    combined = cli.summary_status(text, calculation)
+    if calculation == 'SCF' or combined.startswith('EXX') or combined == 'RELAX CONV':
+        return combined
+    if flags['jobdone']:
+        return 'RELAX INCOMP'
+    return 'UNTERMINATED' if cli.output_core(text)['iters'] else 'UNKNOWN'

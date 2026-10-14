@@ -83,3 +83,30 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(details['minimum_estimate']['value_ry'], 2e-5)
         self.assertEqual(details['last_estimate']['source_line'], len(raw.splitlines()))
         self.assertIsNone(details['last_ended_cycle'])
+
+    def test_runtime_error_precedes_unproven_exchange(self):
+        from qetools.history import overall_status
+        text = HEADER + CYCLE + 'Fock energy (test)\nError in routine test\n'
+        self.assertEqual(overall_status(text, 'RELAX'), 'ERROR')
+
+    def test_stop_prevents_success_with_completed_cycle(self):
+        from qetools.history import overall_status
+        for kind in ('SCF', 'RELAX', 'NSCF', 'UNKNOWN'):
+            self.assertIn(overall_status(HEADER + CYCLE + 'Calculation stopped\nJOB DONE.\n', kind), ('STOPPED', 'RELAX STOP'))
+
+    def test_unassessed_types_cannot_inherit_scf_success(self):
+        from qetools.history import overall_status
+        for kind in ('NSCF', 'BANDS', 'MD', 'VC-MD', 'PHONON', 'UNKNOWN'):
+            self.assertEqual(overall_status(HEADER + CYCLE + 'JOB DONE.\n', kind), 'NOT ASSESSED')
+
+    def test_ionic_completion_requires_normal_execution_and_latest_convergence(self):
+        from qetools.history import overall_status
+        text = HEADER + CYCLE + 'bfgs converged\n'
+        self.assertEqual(overall_status(text, 'RELAX'), 'UNTERMINATED')
+        self.assertEqual(overall_status(text + 'JOB DONE.\n', 'RELAX'), 'RELAX CONV')
+        self.assertNotEqual(overall_status(text + 'iteration # 1\nJOB DONE.\n', 'RELAX'), 'RELAX CONV')
+
+    def test_history_exposes_filename_classification_uncertainty(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp, 'relax.out'); p.write_text(HEADER + CYCLE)
+            self.assertIn('filename fallback', self.report(p))

@@ -2201,49 +2201,6 @@ The summary identifies:
         key=lambda x: (x.stat().st_mtime, str(x)),
     )
 
-    def history_relax_status(text0, calc_type):
-        """
-        More explicit relaxation status for history display.
-
-        This intentionally distinguishes an unterminated file from a
-        calculation that QE explicitly stopped.
-        """
-
-        flags = termination_flags(text0)
-        combined = summary_status(text0, calc_type)
-        if combined.startswith("EXX"):
-            return combined
-
-        if flags["error"]:
-            return "ERROR"
-
-        ion = ionic_status(
-            text0,
-            calc_type,
-        )
-
-        if ion == "CONVERGED" and latest_electronic_status(text0) == "CONVERGED" and flags["jobdone"] and not (flags["wall_stop"] or flags["stopped"]):
-            return "RELAX CONV"
-
-        if ion == "STOPPED / INCOMPLETE":
-            return "RELAX STOP"
-
-        # No convergence and no explicit stop/error.
-        core0 = output_core(text0)
-
-        if (
-            core0.get("energies")
-            or core0.get("forces")
-            or core0.get("iters")
-        ):
-            if not flags["jobdone"]:
-                return "UNTERMINATED"
-
-        if flags["jobdone"]:
-            return "RELAX INCOMP"
-
-        return "UNKNOWN"
-
     print(
         f"{'MODIFIED UTC':<21}"
         f"{'TYPE':<10}"
@@ -2267,10 +2224,9 @@ The summary identifies:
         except Exception:
             continue
 
-        typ = classify_output(
-            f,
-            text0,
-        )
+        from qetools.calculations import identify
+        identity = identify(f, text0)
+        typ = identity["calculation"]
 
         core = output_core(
             text0
@@ -2295,16 +2251,8 @@ The summary identifies:
         current = details["latest_cycle_status"]
         nconv = details["converged_cycles"]
 
-        if typ in ("RELAX", "VC-RELAX"):
-            overall = history_relax_status(
-                text0,
-                typ,
-            )
-        else:
-            overall = summary_status(
-                text0,
-                typ,
-            )
+        from qetools.history import overall_status
+        overall = overall_status(text0, typ)
 
         rows.append(
             {
@@ -2317,6 +2265,7 @@ The summary identifies:
                 "current": current,
                 "nconv": nconv,
                 "overall": overall,
+                "identity": identity,
             }
         )
 
@@ -2332,6 +2281,15 @@ The summary identifies:
             f"{overall:<15}"
             f"{f.name}"
         )
+
+    uncertain = [r for r in rows if r["identity"]["warnings"]]
+    if uncertain:
+        print("\nTYPE EVIDENCE / LIMITS:")
+        for row in uncertain:
+            print(f"  {row['file'].name}: {row['identity']['source']}")
+            for warning in row["identity"]["warnings"]:
+                print(f"    {warning.replace('supply --input', 'inspect with --input').replace('Supply --input', 'Inspect with --input')}")
+    print("NOT ASSESSED: this history view does not validate this calculation type.")
 
     print("\nMODIFIED UTC: file modification time; copying a file can change its order.")
     print("MIN/LAST EST: minimum/last printed SCF accuracy estimate in the latest run, in Ry.")

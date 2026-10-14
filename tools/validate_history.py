@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from qetools.history import evidence
+from qetools.history import evidence, overall_status
+from validate_outputs import reference
 
 
 def audit(path):
@@ -35,6 +36,22 @@ def audit(path):
                 'latest_cycle_id': cycle, 'latest_cycle_status': status,
                 'converged_cycles': sum(c['status']=='CONVERGED' for c in ended)}
     observed = evidence(data.decode(errors='replace'))
+    # Declared scope of this local corpus: SCF or fixed-cell BFGS relaxation.
+    kind = 'RELAX' if 'relax' in path.name else 'SCF'
+    state = reference(data.decode(errors='replace'))
+    if state['error']:
+        verdict = 'ERROR'
+    elif state['stop']:
+        verdict = 'RELAX STOP' if kind == 'RELAX' else 'STOPPED'
+    elif kind == 'RELAX':
+        verdict = ('RELAX CONV' if state['bfgs'] and state['done'] and state['electronic']=='CONVERGED'
+                   else 'RELAX INCOMP' if state['done'] else 'UNTERMINATED')
+    else:
+        verdict = ('CONVERGED' if state['done'] and state['electronic']=='CONVERGED'
+                   else 'NOT CONV' if state['electronic']=='NOT CONVERGED'
+                   else 'INCOMPLETE' if state['electronic']=='INCOMPLETE' else 'UNKNOWN')
+    expected['overall'] = verdict
+    observed['overall'] = overall_status(data.decode(errors='replace'), kind)
     return {'file':str(path.resolve()), 'sha256':hashlib.sha256(data).hexdigest(), 'checks':len(expected),
             'failures':[{'field':k,'expected':v,'observed':observed[k]} for k,v in expected.items() if v != observed[k]]}
 
@@ -46,6 +63,6 @@ if __name__ == '__main__':
             row=audit(path)
             if row and row['sha256'] not in seen:
                 seen.add(row['sha256']); rows.append(row)
-    result={'scope':'History electronic evidence only; explicit PWSCF cycle banners required. Not an independent type/overall/date audit.',
+    result={'scope':'History electronic evidence only; explicit PWSCF cycle banners required. Overall verdicts checked within declared SCF/fixed-cell BFGS corpus. Not an independent generic type/date audit.',
             'unique_files':len(rows),'checks':sum(r['checks'] for r in rows),'failures':sum(len(r['failures']) for r in rows),'results':rows}
     print(json.dumps(result,indent=2)); sys.exit(bool(result['failures']))
