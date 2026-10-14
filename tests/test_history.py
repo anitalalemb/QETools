@@ -45,7 +45,7 @@ class HistoryTests(unittest.TestCase):
 
     def test_zero_estimate_is_not_missing(self):
         row, _ = self.row(HEADER + 'iteration # 1\nestimated scf accuracy < 0 Ry\n')
-        self.assertEqual(row.count('0.000e+00'), 2)
+        self.assertEqual(row.count('0.000e+00'), 3)
 
     def test_aliases_forward_path_with_spaces_and_help(self):
         root = Path(__file__).resolve().parents[1]
@@ -62,3 +62,24 @@ class HistoryTests(unittest.TestCase):
             rows = [x for x in self.report(tmp).splitlines() if x.startswith('1970-')]
             self.assertTrue(rows[0].endswith('a.out'))
             self.assertTrue(rows[1].endswith('b.out'))
+
+    def test_estimate_does_not_leak_into_unfinished_new_cycle(self):
+        from qetools.history import evidence
+        details = evidence(HEADER + CYCLE + 'iteration # 1\n')
+        self.assertEqual(details['last_estimate']['cycle_id'], 1)
+        self.assertEqual(details['latest_cycle_id'], 2)
+        self.assertIsNone(details['latest_cycle_estimate'])
+
+    def test_error_does_not_erase_previous_convergence_outcome(self):
+        from qetools.history import evidence
+        details = evidence(HEADER + CYCLE + 'Error in routine test\n')
+        self.assertEqual(details['last_ended_cycle']['status'], 'CONVERGED')
+        self.assertEqual(details['latest_cycle_status'], 'ERROR')
+
+    def test_appended_runs_preserve_original_evidence_lines(self):
+        from qetools.history import evidence
+        raw = HEADER + CYCLE + HEADER + 'iteration # 1\nestimated scf accuracy < 2e-5 Ry\n'
+        details = evidence(raw)
+        self.assertEqual(details['minimum_estimate']['value_ry'], 2e-5)
+        self.assertEqual(details['last_estimate']['source_line'], len(raw.splitlines()))
+        self.assertIsNone(details['last_ended_cycle'])

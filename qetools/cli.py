@@ -2244,21 +2244,13 @@ The summary identifies:
 
         return "UNKNOWN"
 
-    def electronic_history_status(text0, calc_type):
-        from qetools.records import parse_cycles
-        cycles = parse_cycles(text0)["cycles"]
-        ended = [c for c in cycles if c["status"] in ("CONVERGED", "NOT CONVERGED")]
-        return (
-            ended[-1]["status"] if ended else "NONE",
-            cycles[-1]["status"] if cycles else "UNKNOWN",
-            sum(c["status"] == "CONVERGED" for c in cycles),
-        )
-
     print(
         f"{'MODIFIED UTC':<21}"
         f"{'TYPE':<10}"
         f"{'MIN EST (Ry)':<13}"
         f"{'LAST EST (Ry)':<14}"
+        f"{'EST CYCLE':<10}"
+        f"{'LATEST EST':<13}"
         f"{'LAST ENDED':<15}"
         f"{'LATEST CYCLE':<15}"
         f"{'OVERALL':<15}"
@@ -2296,10 +2288,12 @@ The summary identifies:
             else None
         )
 
-        last_done, current, nconv = electronic_history_status(
-            text0,
-            typ,
-        )
+        from qetools.history import evidence
+        details = evidence(f.read_text(errors="replace"))
+        ended = details["last_ended_cycle"]
+        last_done = ended["status"] if ended else "NONE"
+        current = details["latest_cycle_status"]
+        nconv = details["converged_cycles"]
 
         if typ in ("RELAX", "VC-RELAX"):
             overall = history_relax_status(
@@ -2331,6 +2325,8 @@ The summary identifies:
             f"{typ:<10}"
             f"{fmt_float(best):<13}"
             f"{fmt_float(last):<14}"
+            f"{str((details['last_estimate'] or {}).get('cycle_id') or '—'):<10}"
+            f"{fmt_float((details['latest_cycle_estimate'] or {}).get('value_ry')):<13}"
             f"{last_done:<15}"
             f"{current:<15}"
             f"{overall:<15}"
@@ -2339,6 +2335,7 @@ The summary identifies:
 
     print("\nMODIFIED UTC: file modification time; copying a file can change its order.")
     print("MIN/LAST EST: minimum/last printed SCF accuracy estimate in the latest run, in Ry.")
+    print("EST CYCLE: cycle containing LAST EST; LATEST EST: latest cycle estimate, in Ry.")
     print("LAST EST may belong to an earlier cycle; it is not necessarily the latest cycle's estimate.")
     print("LAST ENDED: last cycle with a convergence outcome; NONE means no such outcome.")
     print("LATEST CYCLE: last electronic cycle in the output; this does not establish a live process.")
