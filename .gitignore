@@ -16,3 +16,8 @@ qetools/cli_v*_pre_*.py
 qetools/cli_*backup*.py
 qetools/cli_before_*.py
 qetools/cli_v*_pre_*.py
+
+.venv/
+build/
+dist/
+*.egg-info/

@@ -3,6 +3,7 @@ from datetime import datetime
 import re
 import sys
 import math
+import os
 
 FLOAT = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?"
 
@@ -11,8 +12,14 @@ FLOAT = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?"
 # BASIC HELPERS
 # ============================================================
 
+def latest_run(text):
+    """Do not let an earlier appended PWSCF run certify the current run."""
+    starts = list(re.finditer(r"(?im)^\s*Program PWSCF\b", text))
+    return text[starts[-1].start():] if starts else text
+
+
 def read(path):
-    return Path(path).read_text(errors="ignore")
+    return latest_run(Path(path).read_text(errors="replace"))
 
 
 def dfloat(x):
@@ -133,35 +140,22 @@ def parse_qe_input_settings(text):
         "ecutrho",
     ]
 
+    # Strip Fortran comments without damaging quoted paths containing '!'.
+    clean = re.sub(r"'[^']*'|\"[^\"]*\"|![^\n]*",
+                   lambda m: "" if m.group().startswith("!") else m.group(), text)
     out = {}
-
     for key in keys:
-        pattern = (
-            rf"(?im)^\s*{re.escape(key)}\s*=\s*"
-            rf"(?:'([^']*)'|\"([^\"]*)\"|([^,\n/]+))"
-        )
-
-        m = re.search(pattern, text)
-
-        if not m:
-            continue
-
-        value = next(
-            (
-                g
-                for g in m.groups()
-                if g is not None
-            ),
-            None,
-        )
-
-        if value is not None:
-            out[key] = value.strip()
-
+        pattern = (rf"(?i)(?<![\w]){re.escape(key)}\s*=\s*"
+                   rf"(?:'((?:[^']|'')*)'|\"([^\"]*)\"|([^,\n/!]+))")
+        matches = list(re.finditer(pattern, clean))
+        if matches:
+            value = next(g for g in matches[-1].groups() if g is not None)
+            out[key] = value.strip().replace("''", "'")
     return out
 
 
 def output_core(text):
+    text = latest_run(text)
     iters = []
     acc = []
     energies = []
@@ -202,13 +196,12 @@ def output_core(text):
         if m:
             energies.append(dfloat(m.group(1)))
 
-        m = re.search(
-            r"negative rho.*?:\s*(" + FLOAT + r")",
-            line,
-            re.I,
-        )
+        m = re.search(r"negative rho.*?:\s*(.*)", line, re.I)
         if m:
-            neg.append(abs(dfloat(m.group(1))))
+            # Keep one magnitude per diagnostic line, including both spin channels.
+            channels = [abs(dfloat(value)) for value in re.findall(FLOAT, m.group(1))]
+            if channels:
+                neg.append(max(channels))
 
         m = re.search(
             r"Total force\s*=\s*(" + FLOAT + r")",
@@ -283,8 +276,16 @@ def classify_output(path, text=None):
         return "RELAX"
 
     # --------------------------------------------------------
-    # Explicit NSCF / bands filename evidence
+    # PWSCF uses the same non-SCF banner for NSCF and bands calculations.
+    # It must not enter the SCF candidate list just because its filename is generic.
     # --------------------------------------------------------
+
+    if "band structure calculation" in low:
+        if re.search(r"(^|[_\-.])nscf([_\-.]|$)", name):
+            return "NSCF"
+        if re.search(r"(^|[_\-.])bands?([_\-.]|$)", name):
+            return "BANDS"
+        return "NSCF/BANDS"
 
     if re.search(r"(^|[_\-.])nscf([_\-.]|$)", name):
         return "NSCF"
@@ -352,6 +353,7 @@ def is_qe_output(path):
 # ============================================================
 
 def termination_flags(text):
+    text = latest_run(text)
     return {
         "jobdone": "JOB DONE." in text,
         "wall_stop": bool(
@@ -382,6 +384,7 @@ def latest_electronic_status(text):
     an ionic relaxation can stop at wall time even if previous electronic
     SCF cycles converged.
     """
+    text = latest_run(text)
 
     pos_conv = last_position(
         text,
@@ -427,6 +430,7 @@ def relaxation_electronic_detail(text):
     Separate completed electronic SCF cycles from a possibly unfinished
     current SCF cycle at the end of a relaxation output.
     """
+    text = latest_run(text)
 
     conv_matches = list(re.finditer(
         r"convergence has been achieved in\s+(\d+)\s+iterations",
@@ -487,18 +491,12 @@ def relaxation_electronic_detail(text):
     }
 
 def ionic_status(text, calc_type):
+    text = latest_run(text)
     if calc_type not in ("RELAX", "VC-RELAX"):
         return "N/A"
 
     if re.search(
         r"bfgs converged",
-        text,
-        re.I,
-    ):
-        return "CONVERGED"
-
-    if re.search(
-        r"End of BFGS Geometry Optimization",
         text,
         re.I,
     ):
@@ -515,6 +513,7 @@ def ionic_status(text, calc_type):
 
 
 def summary_status(text, calc_type):
+    text = latest_run(text)
     flags = termination_flags(text)
     electronic = latest_electronic_status(text)
 
@@ -524,7 +523,7 @@ def summary_status(text, calc_type):
     if calc_type in ("RELAX", "VC-RELAX"):
         ion = ionic_status(text, calc_type)
 
-        if ion == "CONVERGED":
+        if ion == "CONVERGED" and electronic == "CONVERGED" and flags["jobdone"] and not (flags["wall_stop"] or flags["stopped"]):
             return "RELAX CONV"
 
         if ion == "STOPPED / INCOMPLETE":
@@ -535,7 +534,7 @@ def summary_status(text, calc_type):
         return "RELAX ?"
 
     if calc_type == "SCF":
-        if electronic == "CONVERGED" and not (
+        if electronic == "CONVERGED" and flags["jobdone"] and not (
             flags["wall_stop"]
             or flags["stopped"]
             or flags["notconv"]
@@ -571,14 +570,15 @@ def discover_outputs(path="."):
 
     files = []
 
-    for f in p.glob("*.out"):
+    for f in p.iterdir():
+        if f.suffix.lower() not in (".out", ".log", ".stdout"):
+            continue
         if f.is_file() and is_qe_output(f):
             files.append(f)
 
     return sorted(
         files,
-        key=lambda x: x.stat().st_mtime,
-        reverse=True,
+        key=lambda x: (-x.stat().st_mtime, str(x)),
     )
 
 
@@ -625,7 +625,7 @@ def select_scf_file(path=".", mode="latest"):
 
             conv = summary_status(text, "SCF") == "CONVERGED"
 
-            best = min(c["acc"]) if c["acc"] else float("inf")
+            best = c["acc"][-1] if c["acc"] else float("inf")
 
             # Converged calculations first,
             # then lowest residual,
@@ -644,6 +644,7 @@ def select_scf_file(path=".", mode="latest"):
                 x[0],
                 x[1],
                 x[2],
+                str(x[3]),
             )
         )
 
@@ -756,7 +757,7 @@ Explicit file:
     calc_type = classify_output(p, text)
 
     print("=" * 90)
-    print("QESCF — RESEARCH-GRADE QUANTUM ESPRESSO SCF ANALYZER v0.3")
+    print("QESCF — QUANTUM ESPRESSO SCF ANALYSIS")
     print("=" * 90)
     print(f"File                        : {p.resolve()}")
     print(f"Calculation classification  : {calc_type}")
@@ -1120,14 +1121,14 @@ Explicit file:
 
     if charge_wrong:
         status_line(
-            "Charge consistency",
+            "Charge-error messages",
             "WARNING",
             "QE reported 'charge is wrong'",
         )
     else:
         status_line(
-            "Charge consistency",
-            "PASS",
+            "Charge-error messages",
+            "NONE FOUND",
         )
 
     # --------------------------------------------------------
@@ -1453,7 +1454,7 @@ Explicit file:
         if r["qe_error"]:
             return "ERROR"
 
-        if r["bfgs_conv"] or r["end_bfgs"]:
+        if r["bfgs_conv"] and r["job_done"] and not (r["wall_stop"] or r["stopped"]) and latest_electronic_status(text) == "CONVERGED":
             return "CONVERGED"
 
         if r["wall_stop"] or r["stopped"]:
@@ -1679,8 +1680,8 @@ Explicit file:
 
     print("=" * 94)
     print(
-        "QERELAX — RESEARCH-GRADE QUANTUM ESPRESSO "
-        "RELAXATION ANALYZER v0.4"
+        "QERELAX — QUANTUM ESPRESSO "
+        "RELAXATION ANALYSIS"
     )
     print("=" * 94)
 
@@ -2100,7 +2101,9 @@ Explicit file:
         "FAIL"
         if r["qe_error"]
         else (
-            "PASS"
+            "STOPPED"
+            if r["wall_stop"] or r["stopped"]
+            else "PASS"
             if r["job_done"]
             else "UNKNOWN"
         )
@@ -2314,8 +2317,8 @@ The summary identifies:
 
     print("=" * 154)
     print(
-        "QEHISTORY — RESEARCH-GRADE QUANTUM ESPRESSO "
-        "CALCULATION HISTORY v0.7"
+        "QEHISTORY — QUANTUM ESPRESSO "
+        "CALCULATION HISTORY"
     )
     print("=" * 154)
 
@@ -2349,7 +2352,7 @@ The summary identifies:
             calc_type,
         )
 
-        if ion == "CONVERGED":
+        if ion == "CONVERGED" and latest_electronic_status(text0) == "CONVERGED" and flags["jobdone"] and not (flags["wall_stop"] or flags["stopped"]):
             return "RELAX CONV"
 
         if ion == "STOPPED / INCOMPLETE":
@@ -2557,8 +2560,8 @@ The summary identifies:
         best_scf = min(
             converged_scfs,
             key=lambda r: (
-                r["best"]
-                if r["best"] is not None
+                r["last"]
+                if r["last"] is not None
                 else float("inf"),
                 -r["file"].stat().st_mtime,
             ),
@@ -2570,8 +2573,8 @@ The summary identifies:
         )
 
         print(
-            f"{'Best converged residual':<32}: "
-            f"{fmt_float(best_scf['best'])} Ry"
+            f"{'Selected final SCF accuracy':<32}: "
+            f"{fmt_float(best_scf['last'])} Ry"
         )
 
     else:
@@ -3090,8 +3093,7 @@ Important:
             "bfgs_converged":
                 bool(
                     re.search(
-                        r"\bbfgs converged\b|"
-                        r"End of BFGS Geometry Optimization",
+                        r"\bbfgs converged\b",
                         text0,
                         re.I,
                     )
@@ -3116,8 +3118,8 @@ Important:
 
     print("=" * 112)
     print(
-        "QECOMPARE — RESEARCH-GRADE QUANTUM ESPRESSO "
-        "COMPARISON v0.6"
+        "QECOMPARE — QUANTUM ESPRESSO "
+        "COMPARISON"
     )
     print("=" * 112)
 
@@ -4255,8 +4257,7 @@ Explicit input:
         directory outputs and verify metadata before claiming a match.
         """
         outs = [
-            f for f in input_file.parent.glob("*.out")
-            if f.is_file()
+            f for f in discover_outputs(input_file.parent)
         ]
 
         prefix = settings.get("prefix")
@@ -4288,9 +4289,8 @@ Explicit input:
                 if clean_value(prefix) in t:
                     score += 2
 
-            scored.append(
-                (score, f.stat().st_mtime, f, t)
-            )
+            if score >= 5:
+                scored.append((score, f.stat().st_mtime, f, t))
 
         scored.sort(
             key=lambda x: (x[0], x[1]),
@@ -4321,7 +4321,7 @@ Explicit input:
         srun_lines = [
             x.strip()
             for x in txt.splitlines()
-            if re.search(r"\bsrun\b.*\bpw\.x\b", x)
+            if not x.lstrip().startswith("#") and re.search(r"(?:^|[\s/])pw\.x(?:\s|$)", x)
         ]
 
         return {
@@ -4337,8 +4337,8 @@ Explicit input:
 
     def find_related_scripts(input_file):
         scripts = sorted(
-            f for f in input_file.parent.glob("*.sh")
-            if f.is_file()
+            f for f in input_file.parent.iterdir()
+            if f.is_file() and f.suffix.lower() in (".sh", ".slurm", ".sbatch", ".pbs")
         )
 
         exact = []
@@ -4360,8 +4360,8 @@ Explicit input:
 
     print("=" * 100)
     print(
-        "QECHECK — RESEARCH-GRADE QUANTUM ESPRESSO "
-        "INTEGRITY CHECKER v0.5"
+        "QECHECK — QUANTUM ESPRESSO "
+        "INPUT AND FILE CHECKS"
     )
     print("=" * 100)
 
@@ -4391,19 +4391,19 @@ Explicit input:
         print("=" * 100)
 
         calc = clean_value(
-            settings.get("calculation")
+            settings.get("calculation", "scf")
         )
 
         prefix = clean_value(
-            settings.get("prefix")
+            settings.get("prefix", "pwscf")
         )
 
         outdir_raw = clean_value(
-            settings.get("outdir")
+            settings.get("outdir", os.environ.get("ESPRESSO_TMPDIR", "./"))
         )
 
         pseudo_raw = clean_value(
-            settings.get("pseudo_dir")
+            settings.get("pseudo_dir", os.environ.get("ESPRESSO_PSEUDO", "./"))
         )
 
         nat_raw = clean_value(
@@ -4692,25 +4692,12 @@ Explicit input:
             )
 
         if occ and occ.lower() == "smearing":
-            if not smear:
-                local_warn.append(
-                    "occupations='smearing' but smearing type was not parsed"
-                )
-
             if not degauss:
                 local_warn.append(
                     "occupations='smearing' but degauss was not parsed"
                 )
 
-        for key in (
-            "ecutwfc",
-            "ecutrho",
-            "conv_thr",
-            "electron_maxstep",
-            "diagonalization",
-            "mixing_beta",
-            "mixing_mode",
-        ):
+        for key in ("ecutwfc",):
             if key not in settings:
                 local_warn.append(
                     f"{key} not explicitly parsed from input"
@@ -5194,7 +5181,7 @@ Explicit input:
         # SLURM / EXECUTION SCRIPT
         # ----------------------------------------------------
 
-        print("\nSLURM / LAUNCH SCRIPT")
+        print("\nOPTIONAL LAUNCH SCRIPT")
 
         related_scripts, all_scripts = find_related_scripts(
             inp
@@ -5212,9 +5199,7 @@ Explicit input:
             )
 
             if all_scripts:
-                local_warn.append(
-                    "no .sh script explicitly references this input file"
-                )
+                print("Launch validation: not assessed (no script explicitly references this input)")
 
                 if show_all:
                     print(
@@ -5225,9 +5210,7 @@ Explicit input:
                             f"  {sh.name}"
                         )
             else:
-                local_warn.append(
-                    "no Slurm/shell scripts found in calculation directory"
-                )
+                print("Launch validation: not assessed (no saved launch script; local runs are supported)")
 
         else:
             for sh in scripts_to_show:
@@ -5271,10 +5254,6 @@ Explicit input:
                             f"{'  module':<30}: {line}"
                         )
 
-                else:
-                    local_warn.append(
-                        f"{sh.name}: no module command found"
-                    )
 
                 if info["srun"]:
                     for line in info["srun"]:
@@ -5287,35 +5266,8 @@ Explicit input:
                     )
 
                 else:
-                    local_fail.append(
-                        f"{sh.name}: no srun ... pw.x launch found"
-                    )
-
-                has_reset = any(
-                    re.search(
-                        r"\bmodule\s+reset\b",
-                        x,
-                    )
-                    for x in info["modules"]
-                )
-
-                if not has_reset:
                     local_warn.append(
-                        f"{sh.name}: no 'module reset' before QE environment setup"
-                    )
-
-                qe_modules = [
-                    x for x in info["modules"]
-                    if "espresso" in x.lower()
-                ]
-
-                if qe_modules:
-                    local_pass.append(
-                        f"{sh.name} loads Quantum ESPRESSO module"
-                    )
-                else:
-                    local_warn.append(
-                        f"{sh.name}: no espresso module load detected"
+                        f"{sh.name}: no recognizable pw.x launch found (review manually)"
                     )
 
                 # Cross-check MPI ranks if values are plain integers.
@@ -5324,7 +5276,7 @@ Explicit input:
                     ntpn = int(info["ntasks_per_node"])
                     expected_ranks = nodes * ntpn
 
-                    if info["srun"]:
+                    if info["srun"] and re.search(r"\bsrun\b", info["srun"][0]):
                         launch = info["srun"][0]
 
                         m = re.search(
@@ -5516,7 +5468,7 @@ Explicit input:
 # QETOOLS MAIN
 # ============================================================
 
-def main():
+def legacy_main():
     if len(sys.argv) < 2:
         print(
             """
@@ -5584,6 +5536,11 @@ Usage:
         raise SystemExit(
             f"Unknown command: {cmd}"
         )
+
+
+def main():
+    from qetools.commands import main as run
+    return run()
 
 
 if __name__ == "__main__":
