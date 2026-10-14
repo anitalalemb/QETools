@@ -60,7 +60,10 @@ qescf scf_theta16m7_b0005_smearing_plain_4node.out
 qescf DIRECTORY --best
 qescf scf.out --verbose
 qescf scf.out --json
+qescf scf.out --input scf.in
 qerelax relax.out
+qerelax relax.out --input relax.in --steps --json
+qetools inspect calculation.out --input calculation.in --json
 qehistory .
 qecheck .
 qecheck . --verbose
@@ -70,6 +73,10 @@ qecompare A.out B.out
 SCF and relaxation reports are concise by default. `--verbose` shows detailed evidence.
 `--json` exports the same parsed values, units and selection reason. `--list --json` returns an array.
 Directory discovery reads `.out`, `.log` and `.stdout` files without recursion.
+Use `--input` to declare an exact input/output association and check the requested SCF target.
+Use `--steps` for cycle records with geometry, forces, stress and source lines.
+See the [cycle report guide](docs/CYCLE_REPORTS.md) for meanings and limits.
+
 To use the source without installing, run `python3 -m qetools.cli COMMAND ...` from this repository.
 
 ## Interpret the result
@@ -82,7 +89,7 @@ The SCF accuracy is QE's printed estimate. It is not a separate measurement of t
 A total-force diagnostic is not the optimizer's component-wise force criterion.
 A raw energy difference requires a consistent physical setup before interpretation.
 
-The checked scope is SCF and BFGS relaxation. Input matching and restart checks are heuristic.
+The checked scope is SCF and BFGS relaxation in the available STO corpus (QE 7.3.1 and 7.5). Input matching and restart checks are heuristic.
 Relative paths assume the input directory was the launch directory. Restart-file presence does not prove usability.
 FIRE/damped methods, variable-cell stress/geometry, magnetic/Hubbard cases and phonons need dedicated validation.
 

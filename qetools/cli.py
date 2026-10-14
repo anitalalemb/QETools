@@ -13,9 +13,8 @@ FLOAT = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?"
 # ============================================================
 
 def latest_run(text):
-    """Do not let an earlier appended PWSCF run certify the current run."""
-    starts = list(re.finditer(r"(?im)^\s*Program PWSCF\b", text))
-    return text[starts[-1].start():] if starts else text
+    from qetools.records import latest_run as scope
+    return scope(text)[0]
 
 
 def read(path):
@@ -102,56 +101,8 @@ def trend(vals):
 # ============================================================
 
 def parse_qe_input_settings(text):
-    """
-    Parse common Quantum ESPRESSO input variables.
-
-    Handles:
-      key = 'quoted/string/value'
-      key = "quoted/string/value"
-      key = unquoted_value
-
-    In particular, absolute paths such as
-    /pscratch/... are preserved rather than being truncated at '/'.
-    """
-
-    keys = [
-        "calculation",
-        "restart_mode",
-        "prefix",
-        "outdir",
-        "pseudo_dir",
-        "nat",
-        "ntyp",
-        "nbnd",
-        "occupations",
-        "smearing",
-        "degauss",
-        "conv_thr",
-        "etot_conv_thr",
-        "forc_conv_thr",
-        "electron_maxstep",
-        "diagonalization",
-        "mixing_beta",
-        "mixing_mode",
-        "startingwfc",
-        "startingpot",
-        "max_seconds",
-        "ecutwfc",
-        "ecutrho",
-    ]
-
-    # Strip Fortran comments without damaging quoted paths containing '!'.
-    clean = re.sub(r"'[^']*'|\"[^\"]*\"|![^\n]*",
-                   lambda m: "" if m.group().startswith("!") else m.group(), text)
-    out = {}
-    for key in keys:
-        pattern = (rf"(?i)(?<![\w]){re.escape(key)}\s*=\s*"
-                   rf"(?:'((?:[^']|'')*)'|\"([^\"]*)\"|([^,\n/!]+))")
-        matches = list(re.finditer(pattern, clean))
-        if matches:
-            value = next(g for g in matches[-1].groups() if g is not None)
-            out[key] = value.strip().replace("''", "'")
-    return out
+    from qetools.inputs import scalar_settings
+    return scalar_settings(text)
 
 
 def output_core(text):
@@ -225,112 +176,13 @@ def output_core(text):
 # ============================================================
 
 def classify_output(path, text=None):
-    """
-    Classify a Quantum ESPRESSO output using physical/output evidence first.
-
-    Priority:
-      1. Explicit relaxation / variable-cell evidence in QE output
-      2. Strong NSCF / bands filename evidence
-      3. Conservative relaxation filename fallback
-      4. Standard PWSCF SCF evidence
-      5. UNKNOWN
-
-    Parent-directory names are never used for classification.
-    Generic words such as "relaxed" must not turn an SCF into RELAX.
-    """
-
-    p = Path(path)
-
+    from qetools.calculations import identify
     if text is None:
         try:
-            text = read(p)
-        except Exception:
+            text = read(path)
+        except OSError:
             return "UNKNOWN"
-
-    name = p.name.lower()
-    low = text.lower()
-
-    # --------------------------------------------------------
-    # Strong QE relaxation evidence
-    # --------------------------------------------------------
-
-    has_bfgs = (
-        "bfgs geometry optimization" in low
-        or "end of bfgs geometry optimization" in low
-        or "number of bfgs steps" in low
-        or "bfgs converged" in low
-    )
-
-    if has_bfgs:
-        has_vc_evidence = (
-            "variable cell" in low
-            or (
-                "cell_parameters" in low
-                and "new unit-cell volume" in low
-            )
-        )
-
-        if has_vc_evidence:
-            return "VC-RELAX"
-
-        return "RELAX"
-
-    # --------------------------------------------------------
-    # PWSCF uses the same non-SCF banner for NSCF and bands calculations.
-    # It must not enter the SCF candidate list just because its filename is generic.
-    # --------------------------------------------------------
-
-    if "band structure calculation" in low:
-        if re.search(r"(^|[_\-.])nscf([_\-.]|$)", name):
-            return "NSCF"
-        if re.search(r"(^|[_\-.])bands?([_\-.]|$)", name):
-            return "BANDS"
-        return "NSCF/BANDS"
-
-    if re.search(r"(^|[_\-.])nscf([_\-.]|$)", name):
-        return "NSCF"
-
-    if (
-        re.search(r"(^|[_\-.])bands?([_\-.]|$)", name)
-        or name.startswith("bands")
-    ):
-        return "BANDS"
-
-    # --------------------------------------------------------
-    # Conservative relaxation filename fallback
-    # --------------------------------------------------------
-    # Some truncated/early relaxation outputs may contain normal PWSCF
-    # electronic iterations but never reach the BFGS markers. In those
-    # cases use only explicit calculation-style relaxation tokens.
-    #
-    # Do NOT match generic words such as "relaxed", "pre_relaxed",
-    # "post_relaxed", etc.
-
-    if (
-        re.search(r"(^|[_\-.])relax([_\-.]|$)", name)
-        or re.search(r"(^|[_\-.])vc-relax([_\-.]|$)", name)
-        or re.search(r"(^|[_\-.])rx([_\-.]|$)", name)
-    ):
-        if "vc-relax" in name:
-            return "VC-RELAX"
-
-        return "RELAX"
-
-    # --------------------------------------------------------
-    # Standard electronic PWSCF evidence
-    # --------------------------------------------------------
-
-    if (
-        "program pwscf" in low
-        and (
-            "estimated scf accuracy" in low
-            or "convergence has been achieved" in low
-            or "number of kohn-sham states" in low
-        )
-    ):
-        return "SCF"
-
-    return "UNKNOWN"
+    return identify(path, latest_run(text))["calculation"]
 
 
 def is_qe_output(path):
@@ -341,6 +193,7 @@ def is_qe_output(path):
 
     return (
         "Program PWSCF" in text
+        or re.search(r"(?im)^\s*Program\s+(?:PHONON|PROJWFC|BANDS|DOS|HP|Q2R|MATDYN)\b", text)
         or "estimated scf accuracy" in text
         or "BFGS Geometry Optimization" in text
         or "JOB DONE." in text
@@ -360,7 +213,7 @@ def termination_flags(text):
             re.search(r"Maximum CPU time exceeded", text, re.I)
         ),
         "stopped": bool(
-            re.search(r"Calculation stopped", text, re.I)
+            re.search(r"Calculation(?: \(EXX\))? stopped", text, re.I)
         ),
         "notconv": bool(
             re.search(r"convergence NOT achieved", text, re.I)
@@ -512,13 +365,28 @@ def ionic_status(text, calc_type):
     return "UNPROVEN"
 
 
+def exchange_status(text):
+    text = latest_run(text)
+    if not re.search(r"Calculation \(EXX\)|EXX self-consistency|EXX convergence|Fock energy \(", text, re.I):
+        return "N/A"
+    reached = last_position(text, r"EXX self-consistency reached")
+    failed = last_position(text, r"EXX convergence NOT achieved|Calculation \(EXX\) stopped")
+    if failed > reached:
+        return "NOT CONVERGED"
+    return "CONVERGED" if reached >= 0 else "UNPROVEN"
+
+
 def summary_status(text, calc_type):
     text = latest_run(text)
     flags = termination_flags(text)
     electronic = latest_electronic_status(text)
+    exchange = exchange_status(text)
 
     if flags["error"]:
         return "ERROR"
+
+    if exchange not in ("N/A", "CONVERGED"):
+        return "EXX NOT CONV" if exchange == "NOT CONVERGED" else "EXX UNPROVEN"
 
     if calc_type in ("RELAX", "VC-RELAX"):
         ion = ionic_status(text, calc_type)
@@ -1454,7 +1322,7 @@ Explicit file:
         if r["qe_error"]:
             return "ERROR"
 
-        if r["bfgs_conv"] and r["job_done"] and not (r["wall_stop"] or r["stopped"]) and latest_electronic_status(text) == "CONVERGED":
+        if r["bfgs_conv"] and r["job_done"] and not (r["wall_stop"] or r["stopped"]) and latest_electronic_status(text) == "CONVERGED" and exchange_status(text) in ("N/A", "CONVERGED"):
             return "CONVERGED"
 
         if r["wall_stop"] or r["stopped"]:
@@ -2343,6 +2211,9 @@ The summary identifies:
         """
 
         flags = termination_flags(text0)
+        combined = summary_status(text0, calc_type)
+        if combined.startswith("EXX"):
+            return combined
 
         if flags["error"]:
             return "ERROR"

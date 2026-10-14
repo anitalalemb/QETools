@@ -3,6 +3,7 @@
 Audit date: 14 October 2026.
 
 The existing commands need evidence before broader scientific use.
+The initial audit below is preserved. The follow-up adds explicit input checks and cycle records.
 This report distinguishes the published baseline from this development candidate.
 
 ## Results
@@ -27,6 +28,40 @@ latest electronic state and the completed/converged verdict. Absent values were 
 No unit conversion or physical interpretation was inferred from these comparisons.
 
 Both parsers matched these real cases. The synthetic edge cases exposed failures that this corpus did not trigger.
+
+## Follow-up: input and cycle records
+
+The current candidate passes **73 automated tests**. This adds quote-aware namelist
+reading, explicit input identity/conflicts, printed-threshold comparison, EXX marker
+checks, geometry/cell association, force/stress completeness and program inspection.
+
+The expanded real corpus contains **36 files / 35 unique contents**: 34 use QE 7.5
+and one uses QE 7.3.1. All remain STO cases. The six original fields yield 210 matched
+checks per parser. The published baseline still matches this bounded corpus.
+
+An independent block reader matches **2,357 field/block checks** across **236 electronic
+cycles**, including **217 total per-atom force blocks and 217 stress blocks**.
+Checks include energy/accuracy, geometry/cell source lines, force vectors, stress columns,
+force/stress source lines and force component/norm maxima. Whole-vector/tensor comparisons
+are counted as one block check each; this is not a count of independent physical validations.
+
+The reference reader initially included verbose force-decomposition rows in its total-force
+comparison. Inspection of the output identified that error. It now reads only the block
+headed “Forces acting on atoms”. A regression test protects that distinction.
+
+There are **34 explicitly supplied input/output pairs** in the local check. No type conflict
+was found. Their current-cycle printed-estimate comparisons are: 15 at/below the input target,
+18 above it and one unknown. Many logs end in unfinished electronic cycles. These are
+reported comparisons, not certifications of physical accuracy or failures of the QE calculation.
+
+See [cycle report semantics](CYCLE_REPORTS.md). The full local records remain private.
+Reproduce the cycle check on the supported corpus with:
+
+```sh
+python3 tools/validate_cycle_records.py /path/to/scf-and-relax-logs \
+  --output /path/to/local-cycle-audit.json
+```
+
 
 ## Failures found in the baseline
 
@@ -92,9 +127,9 @@ Private research logs and their full audit records are not included in this repo
 
 - Validate other QE versions and materials, including semiconductor, magnetic and diamond-defect cases.
 - Verify classification against explicitly associated inputs, including NSCF, bands, MD and unusual filenames.
-- Compare parsed estimates with the configured thresholds. Handle hybrid/EXX outer-loop convergence.
+- Extend the implemented printed-threshold and EXX marker checks to real hybrid cases, adaptive settings and additional QE versions.
 - Validate scalar/vector spin quantities and real spin-polarized negative-density cases.
-- Associate energy, force, stress, cell and coordinates with the same completed ionic step.
+- Extend tested electronic-cycle associations to accepted/rejected ionic steps and complete hybrid/variable-cell/MD trajectories.
 - Check per-atom forces, constraints, optimizer-specific criteria and variable-cell pressure convergence.
 - Validate input/output provenance, pseudopotential hashes, XC/Hubbard setup and restart compatibility.
 - Validate full history, comparison and integrity reports beyond their current smoke/contract coverage.
