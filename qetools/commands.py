@@ -140,18 +140,9 @@ def history_command(argv):
     if args.input and not target.is_file():
         parser.error('--input requires one explicit output file')
     if args.json:
-        from datetime import datetime, timezone
-        from .history import evidence, overall_status
-        rows = []
+        from .history import build_record
         files = sorted(cli.discover_outputs(target), key=lambda f: (f.stat().st_mtime, str(f)))
-        for path in files:
-            report = analyze(path, input_path=args.input)
-            raw = path.read_text(errors='replace')
-            details = evidence(raw) if report['program'] in (None, 'PWSCF') else None
-            rows.append({'report': report, 'history_evidence': details,
-                         'history_status': overall_status(raw, report['calculation']),
-                         'modified_utc': datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
-                         'modified_time_source': 'filesystem modification time; not calculation time'})
+        rows = [build_record(path, input_path=args.input) for path in files]
         print(json.dumps({'schema_version': '1.0', 'report_kind': 'history', 'records': rows}, indent=2, allow_nan=False))
         return
     # Validate the declared association before printing the table.

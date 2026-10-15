@@ -144,3 +144,42 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(row['report']['calculation'], 'UNKNOWN')
             self.assertEqual(row['history_status'], 'NOT ASSESSED')
             self.assertIn('conflict', row['report']['classification_source'])
+
+    def test_non_pwscf_text_cannot_supply_scf_estimates(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp, 'phonon.out'); p.write_text('Program PHONON v.7.5\n' + CYCLE + 'JOB DONE.\n')
+            report = self.report(p)
+            row = next(x for x in report.splitlines() if x.endswith('phonon.out') and 'PHONON' in x)
+            self.assertNotIn('1.000e-06', row)
+            self.assertIn('NOT ASSESSED', row)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                main(['history', str(p), '--json'])
+            self.assertIsNone(json.loads(out.getvalue())['records'][0]['history_evidence'])
+
+    def test_unrecognized_explicit_file_is_rejected_in_both_formats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp, 'notes.out'); p.write_text('not a calculation\n')
+            for extra in ([], ['--json']):
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    main(['history', str(p), *extra])
+
+    def test_table_and_json_share_failed_and_incomplete_states(self):
+        import json
+        cases = [HEADER + CYCLE + 'Error in routine test\n',
+                 HEADER + CYCLE + 'iteration # 1\n',
+                 HEADER + CYCLE + 'Calculation stopped\nJOB DONE.\n']
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp, 'scf.out')
+            for raw in cases:
+                p.write_text(raw)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    main(['history', str(p), '--json'])
+                data = json.loads(out.getvalue())['records'][0]
+                row = next(x for x in self.report(p).splitlines() if x.endswith('scf.out') and not x.startswith(' '))
+                self.assertIn(data['history_status'], row)
+                self.assertIn(data['history_evidence']['latest_cycle_status'], row)
+                ended = data['history_evidence']['last_ended_cycle']
+                self.assertIn(ended['status'] if ended else 'NONE', row)

@@ -47,3 +47,18 @@ def overall_status(text, calculation):
     if flags['jobdone']:
         return 'RELAX INCOMP'
     return 'UNTERMINATED' if cli.output_core(text)['iters'] else 'UNKNOWN'
+
+
+def build_record(path, input_path=None):
+    """One validated record shared by the table and JSON interfaces."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from .reporting import analyze
+    path = Path(path)
+    report = analyze(path, input_path=input_path)
+    raw = path.read_text(errors='replace')
+    return {'report': report,
+            'history_evidence': evidence(raw) if report['program'] in (None, 'PWSCF') else None,
+            'history_status': overall_status(raw, report['calculation']),
+            'modified_utc': datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(),
+            'modified_time_source': 'filesystem modification time; not calculation time'}

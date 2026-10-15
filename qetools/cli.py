@@ -2219,44 +2219,20 @@ The summary identifies:
     rows = []
 
     for f in files:
-        try:
-            text0 = read(f)
-        except Exception:
-            continue
-
-        from qetools.calculations import identify
-        settings = None
-        if input_path is not None:
-            from qetools.inputs import parse_namelists
-            settings = parse_namelists(Path(input_path).read_text(errors="replace"))["control"]
-        identity = identify(f, text0, settings)
-        typ = identity["calculation"]
-
-        core = output_core(
-            text0
-        )
-
-        best = (
-            min(core["acc"])
-            if core["acc"]
-            else None
-        )
-
-        last = (
-            core["acc"][-1]
-            if core["acc"]
-            else None
-        )
-
-        from qetools.history import evidence
-        details = evidence(f.read_text(errors="replace"))
-        ended = details["last_ended_cycle"]
-        last_done = ended["status"] if ended else "NONE"
-        current = details["latest_cycle_status"]
-        nconv = details["converged_cycles"]
-
-        from qetools.history import overall_status
-        overall = overall_status(text0, typ)
+        from qetools.history import build_record
+        record = build_record(f, input_path=input_path)
+        report = record["report"]
+        text0 = read(f)
+        identity = {"source": report["classification_source"], "warnings": report["warnings"]}
+        typ = report["calculation"]
+        details = record["history_evidence"] or {}
+        best = (details.get("minimum_estimate") or {}).get("value_ry")
+        last = (details.get("last_estimate") or {}).get("value_ry")
+        ended = details.get("last_ended_cycle")
+        last_done = ended["status"] if ended else "NONE" if record["history_evidence"] is not None else "N/A"
+        current = details.get("latest_cycle_status", "NOT ASSESSED")
+        nconv = details.get("converged_cycles", 0)
+        overall = record["history_status"]
 
         rows.append(
             {
@@ -2278,8 +2254,8 @@ The summary identifies:
             f"{typ:<10}"
             f"{fmt_float(best):<13}"
             f"{fmt_float(last):<14}"
-            f"{str((details['last_estimate'] or {}).get('cycle_id') or '—'):<10}"
-            f"{fmt_float((details['latest_cycle_estimate'] or {}).get('value_ry')):<13}"
+            f"{str((details.get('last_estimate') or {}).get('cycle_id') or '—'):<10}"
+            f"{fmt_float((details.get('latest_cycle_estimate') or {}).get('value_ry')):<13}"
             f"{last_done:<15}"
             f"{current:<15}"
             f"{overall:<15}"

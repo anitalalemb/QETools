@@ -22,7 +22,7 @@ The selected converged SCF uses final printed accuracy, then newest modification
 
 ## Validation: 14 October 2026
 
-All 90 local tests pass. Seventeen dedicated history tests cover the exact heading, incomplete/failed/restarted cycles, zero versus missing estimates, UTC timestamps, filename ties, and identical alias output for files/directories with spaces and help. Added cases cover missing estimates in a new cycle, convergence followed by a runtime error, and original source lines in appended runs. Existing scientific tests cover SCF selection agreement and EXX relaxation guards.
+All 93 local tests pass. Twenty dedicated history tests cover the exact heading, incomplete/failed/restarted cycles, zero versus missing estimates, UTC timestamps, filename ties, and identical alias output for files/directories with spaces and help. Added cases cover missing estimates in a new cycle, convergence followed by a runtime error, and original source lines in appended runs. Existing scientific tests cover SCF selection agreement and EXX relaxation guards.
 
 An independent line reader (`tools/validate_history.py`) matches all 280 electronic-evidence and overall-verdict checks on 35 unique local PWSCF logs. It checks minimum/last/latest-cycle estimates with source lines and cycle IDs, last convergence outcome, latest cycle ID/state and converged-cycle counts. It requires explicit cycle banners. Overall verdict checks are bounded to the declared SCF/fixed-cell BFGS corpus. It does not independently validate generic classification or file dates. Broader calculation types and hybrid/runtime edge cases remain open. The supplied theta18 table cannot be independently verified without its original output files and metadata. The NERSC v0.7 installation has not been changed or inspected.
 
@@ -47,3 +47,9 @@ Input association is declared by the user, not independently proven. Conflicts r
 JSON schema 1.0 contains `records`, each with the common `report`, `history_evidence`, `history_status`, `modified_utc` and modification-time description. History evidence preserves original source lines, minimum/last/latest-cycle estimates in Ry and convergence outcomes. Unsupported programs have no PWSCF history evidence. The common report retains execution and scientific status separately; `history_status` is the table verdict.
 
 Three added tests check explicit input provenance, conflicting types and rejected directory associations. Alias tests also cover input paths with spaces and JSON output.
+
+## Interface consistency: 15 October 2026
+
+Table and JSON now use the same validated history record. The table no longer interprets SCF-like text from non-PWSCF programs as electronic evidence. Unrecognized explicit files fail in both formats. Three regression tests cover unsupported programs, unrecognized files and agreement for errors/stops/incomplete cycles.
+
+The independent 280-check real-log audit still passes. A separate interface comparison matches 245 displayed values/states against shared records for all 35 unique logs. This latter check establishes presentation consistency, not independent scientific correctness.
