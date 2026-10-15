@@ -1,7 +1,7 @@
 # Input and cycle records
 
 The development candidate adds a common JSON report for `qescf`, `qerelax` and
-`qetools inspect`. Its schema version is `1.0`.
+`qetools inspect`. Its schema version is `1.1`.
 
 ## Give the intended input explicitly
 
@@ -52,7 +52,15 @@ Each electronic cycle can contain:
 - Stress tensors in the printed Ry/Bohr³ and kbar columns, plus printed pressure.
 - Evidence line numbers from the original output file.
 
-The current cycle and last completed electronic cycle are separate records.
+The current cycle, last ended cycle and last converged cycle are separate records.
+`electronic_outcome` records CONVERGED or NOT CONVERGED when QE prints that outcome.
+It remains available if a later runtime error changes the cycle's `status` to ERROR.
+`ended_electronic_cycles` counts both convergence outcomes; `converged_electronic_cycles`
+counts successful electronic outcomes. These counts do not prove normal execution or ionic convergence.
+
+For compatibility, `last_completed_cycle` and `completed_scf_cycles` retain their old
+meaning: cycles whose final recorded status is CONVERGED. They are deprecated;
+use the explicit fields above. Schema 1.1 records this distinction in `deprecated_fields`.
 An unfinished new cycle does not inherit the preceding cycle's energy or forces.
 The summary identifies which cycle supplied its last energy, accuracy and force values.
 
@@ -84,3 +92,11 @@ Installed packages without Git metadata report an unknown commit and retain sour
 Full cycle data is included only with `--steps`, or detailed input/inspection reports.
 History, comparison and integrity commands still use their older detailed formats.
 They have not yet been migrated to the common schema.
+
+## Outcome validation: 15 October 2026
+
+All 96 local tests pass. Added cases cover a failed cycle after a converged cycle,
+a runtime error after convergence, and an unfinished cycle with no outcome.
+The independent cycle audit now checks the printed electronic outcome in each
+of the 236 cycles in the 35 unique local logs, alongside its existing geometry,
+force and stress checks. Broader hybrid/MD/optimizer validation remains open.

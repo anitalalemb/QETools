@@ -21,6 +21,10 @@ def show(report):
         print(f"Selection: {report['selection_reason']}")
     print(f"Type evidence: {report.get('classification_source', 'unknown')}")
     print(f"Execution: {report['execution']}   Electronic: {report['electronic']}")
+    for label, key in (('Last ended electronic cycle', 'last_ended_cycle'),
+                       ('Last converged electronic cycle', 'last_converged_cycle')):
+        cycle = report.get(key)
+        print(f"{label}: " + (f"{cycle['cycle_id']} | outcome: {cycle['electronic_outcome']} | latest recorded state: {cycle['status']}" if cycle else 'none found'))
     if report.get('exchange_convergence') not in (None, 'N/A', 'NOT ASSESSED'):
         print(f"EXX convergence: {report['exchange_convergence']}")
     if report['ionic'] != 'N/A':

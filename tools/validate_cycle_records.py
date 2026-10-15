@@ -34,11 +34,15 @@ def expected(raw):
         cells = [i for i,line in before if line.startswith('CELL_PARAMETERS') or 'crystal axes:' in line]
         row = {'geometry_source_line': geometries[-1] if geometries else None,
                'cell_source_line': cells[-1] if cells else None,
-               'energy': None, 'accuracy': None, 'forces': [], 'stress_kbar': None,
+               'electronic_outcome': None, 'energy': None, 'accuracy': None, 'forces': [], 'stress_kbar': None,
                'force_source_line': None, 'stress_source_line': None}
         capturing_force = False
         for i in range(first, end):
             s = lines[i].strip()
+            if s.startswith('convergence has been achieved'):
+                row['electronic_outcome'] = 'CONVERGED'
+            if s.startswith('convergence NOT achieved'):
+                row['electronic_outcome'] = 'NOT CONVERGED'
             if s.lstrip('!').strip().startswith('total energy'):
                 row['energy'] = num(s.split('=',1)[1].split()[0])
             if s.startswith('estimated scf accuracy'):
@@ -71,6 +75,7 @@ def audit(path):
     checks, force_blocks, stress_blocks = 1, 0, 0
     for i, (ref, cycle) in enumerate(zip(refs, parsed['cycles']), 1):
         observed = {
+            'electronic_outcome': cycle['electronic_outcome'],
             'geometry_source_line': (cycle['geometry_at_start'] or {}).get('source_line'),
             'cell_source_line': (cycle['cell_at_start'] or {}).get('source_line'),
             'energy': cycle['last_energy_ry'], 'accuracy': cycle['last_scf_accuracy_ry'],

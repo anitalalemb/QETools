@@ -34,7 +34,7 @@ def parse_cycles(raw, starting_threshold=None):
 
     def begin(line):
         return {'cycle_id': len(cycles) + 1, 'start_line': line, 'status': 'INCOMPLETE',
-                'iterations': [], 'last_energy_ry': None, 'last_scf_accuracy_ry': None,
+                'electronic_outcome': None, 'iterations': [], 'last_energy_ry': None, 'last_scf_accuracy_ry': None,
                 'active_conv_thr_ry': threshold, 'geometry_at_start': deepcopy(geometry),
                 'cell_at_start': deepcopy(cell), 'forces': None, 'stress': None, 'evidence': {}}
 
@@ -116,9 +116,9 @@ def parse_cycles(raw, starting_threshold=None):
             if miter:
                 active['iterations'].append(int(miter.group(1))); active['evidence']['last_iteration'] = lineno
             if re.search(r'convergence has been achieved in\s+\d+\s+iterations', s, re.I):
-                active['status'] = 'CONVERGED'; active['evidence']['convergence'] = lineno
+                active['status'] = 'CONVERGED'; active['electronic_outcome'] = 'CONVERGED'; active['evidence']['convergence'] = lineno
             if re.search(r'convergence NOT achieved', s, re.I):
-                active['status'] = 'NOT CONVERGED'; active['evidence']['convergence'] = lineno
+                active['status'] = 'NOT CONVERGED'; active['electronic_outcome'] = 'NOT CONVERGED'; active['evidence']['convergence'] = lineno
             if 'Error in routine' in s:
                 active['status'] = 'ERROR'; active['evidence']['error'] = lineno
             m = re.search(r'^!?\s*total energy\s*=\s*('+FLOAT+r')\s*Ry', s, re.I)

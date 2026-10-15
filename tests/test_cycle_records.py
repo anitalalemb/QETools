@@ -214,11 +214,37 @@ class ReportsAndExchange(unittest.TestCase):
         self.assertEqual(r['last_completed_cycle']['cycle_id'],1)
         self.assertEqual(r['last_energy_cycle_id'],1)
 
+    def test_failed_ended_cycle_is_not_last_converged_cycle(self):
+        text = HEADER+CYCLE+'Self-consistent Calculation\niteration # 1\nconvergence NOT achieved\n'
+        r = self.report(text)
+        self.assertEqual(r['last_ended_cycle']['cycle_id'], 2)
+        self.assertEqual(r['last_ended_cycle']['electronic_outcome'], 'NOT CONVERGED')
+        self.assertEqual(r['last_converged_cycle']['cycle_id'], 1)
+        self.assertEqual(r['ended_electronic_cycles'], 2)
+        self.assertEqual(r['converged_electronic_cycles'], 1)
+        self.assertEqual(r['last_completed_cycle']['cycle_id'], 1)
+
+    def test_runtime_error_retains_electronic_outcome(self):
+        r = self.report(HEADER+CYCLE+'Error in routine test\n')
+        self.assertEqual(r['last_converged_cycle']['status'], 'ERROR')
+        self.assertEqual(r['last_converged_cycle']['electronic_outcome'], 'CONVERGED')
+        self.assertEqual(r['execution'], 'ERROR')
+        self.assertEqual(r['status'], 'ERROR')
+        self.assertEqual(r['converged_electronic_cycles'], 1)
+        self.assertEqual(r['completed_scf_cycles'], 0)
+
+    def test_unfinished_cycle_has_no_convergence_outcome(self):
+        r = self.report(HEADER+'Self-consistent Calculation\niteration # 1\n')
+        self.assertIsNone(r['last_ended_cycle'])
+        self.assertIsNone(r['last_converged_cycle'])
+        self.assertIsNone(r['current_cycle']['electronic_outcome'])
+        self.assertEqual(r['ended_electronic_cycles'], 0)
+
     def test_hashes_and_schema_are_recorded(self):
         text=HEADER+CYCLE+'JOB DONE.\n'
         r=self.report(text)
         self.assertEqual(r['provenance']['output_sha256'],hashlib.sha256(text.encode()).hexdigest())
-        self.assertEqual(r['schema_version'],'1.0')
+        self.assertEqual(r['schema_version'],'1.1')
         self.assertIn('inputs',r['provenance']['source_sha256'])
 
     def test_input_directory_association_is_rejected(self):

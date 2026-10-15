@@ -53,7 +53,7 @@ def cycle_summary(cycle):
     if cycle is None:
         return None
     forces, stress = cycle['forces'], cycle['stress']
-    return {key: cycle.get(key) for key in ('cycle_id', 'status', 'last_energy_ry', 'last_scf_accuracy_ry', 'active_conv_thr_ry', 'evidence')} | {
+    return {key: cycle.get(key) for key in ('cycle_id', 'status', 'electronic_outcome', 'last_energy_ry', 'last_scf_accuracy_ry', 'active_conv_thr_ry', 'evidence')} | {
         'iteration_records': len(cycle['iterations']),
         'geometry_source_line': (cycle['geometry_at_start'] or {}).get('source_line'),
         'force_block_complete': forces['complete'] if forces else None,
@@ -131,13 +131,15 @@ def analyze(path, input_path=None, include_cycles=False):
     else:
         action = 'Inspect the final output section; final convergence is not established.'
     completed = [cycle for cycle in cycles if cycle['status'] == 'CONVERGED']
+    ended = [cycle for cycle in cycles if cycle['electronic_outcome'] is not None]
+    converged = [cycle for cycle in ended if cycle['electronic_outcome'] == 'CONVERGED']
     last_energy = next((cycle for cycle in reversed(cycles) if cycle['last_energy_ry'] is not None), None)
     last_accuracy = next((cycle for cycle in reversed(cycles) if cycle['last_scf_accuracy_ry'] is not None), None)
     last_total_force = next((cycle for cycle in reversed(cycles) if 'total_force_diagnostic_ry_bohr' in cycle), None)
     last_force = next((cycle for cycle in reversed(cycles) if cycle['forces']), None)
     last_stress = next((cycle for cycle in reversed(cycles) if cycle['stress']), None)
     report = {
-        'schema_version': '1.0', 'file': str(path.resolve()), 'calculation': kind,
+        'schema_version': '1.1', 'file': str(path.resolve()), 'calculation': kind,
         'classification_source': identity['source'], 'program': program,
         'status': status, 'execution': execution, 'electronic': electronic, 'ionic': ionic,
         'last_energy_ry': cli.last_or(core['energies']), 'last_scf_accuracy_ry': cli.last_or(core['acc']),
@@ -145,6 +147,13 @@ def analyze(path, input_path=None, include_cycles=False):
         'threshold_check': thresholds if kind not in ('NSCF', 'BANDS', 'NSCF/BANDS') else {'comparison': 'N/A (non-self-consistent)', 'requested_conv_thr_ry': None},
         'current_cycle': cycle_summary(cycles[-1] if cycles else None),
         'last_completed_cycle': cycle_summary(completed[-1] if completed else None),
+        'last_ended_cycle': cycle_summary(ended[-1] if ended else None),
+        'last_converged_cycle': cycle_summary(converged[-1] if converged else None),
+        'ended_electronic_cycles': len(ended),
+        'converged_electronic_cycles': len(converged),
+        'deprecated_fields': {
+            'last_completed_cycle': 'Legacy: last cycle whose final status is CONVERGED. Use last_ended_cycle or last_converged_cycle.',
+            'completed_scf_cycles': 'Legacy: count of cycles whose final status is CONVERGED. Use ended_electronic_cycles or converged_electronic_cycles.'},
         'last_energy_cycle_id': last_energy['cycle_id'] if last_energy else None,
         'last_accuracy_cycle_id': last_accuracy['cycle_id'] if last_accuracy else None,
         'last_total_force_cycle_id': last_total_force['cycle_id'] if last_total_force else None,

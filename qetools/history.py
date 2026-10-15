@@ -15,12 +15,11 @@ def evidence(raw):
                             'cycle_id': cycle['cycle_id'] if cycle else None})
     # Outcome evidence survives a subsequent runtime error in the same cycle.
     ended = []
-    lines = raw.splitlines()
     for cycle in cycles:
         line = cycle['evidence'].get('convergence')
         if line:
             ended.append({'cycle_id': cycle['cycle_id'], 'source_line': line,
-                          'status': 'NOT CONVERGED' if 'convergence NOT achieved' in lines[line-1] else 'CONVERGED'})
+                          'status': cycle['electronic_outcome']})
     latest = cycles[-1] if cycles else None
     return {'minimum_estimate': min(samples, key=lambda s: s['value_ry']) if samples else None,
             'last_estimate': samples[-1] if samples else None,
