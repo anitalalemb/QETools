@@ -32,7 +32,7 @@ def show(report):
     for label, key, unit in (
         ('Last total energy', 'last_energy_ry', 'Ry'),
         ('Last SCF accuracy estimate', 'last_scf_accuracy_ry', 'Ry'),
-        ('Last total force', 'last_total_force_ry_bohr', 'Ry/Bohr'),
+        ('QE printed total-force diagnostic', 'last_total_force_ry_bohr', 'Ry/Bohr'),
     ):
         value = report[key]
         if value is not None:
@@ -40,8 +40,24 @@ def show(report):
     threshold = report.get('threshold_check', {})
     if threshold.get('requested_conv_thr_ry') is not None:
         print(f"Input SCF target: {threshold['requested_conv_thr_ry']:.3g} Ry | {threshold['comparison']}")
-    if report.get('last_force_cycle_id') is not None:
-        print(f"Per-atom force record: electronic cycle {report['last_force_cycle_id']}")
+    force = report.get('last_force_record')
+    if force:
+        scope = 'complete block' if force['complete'] else 'partial block; observed atoms only'
+        print(f"Atomic forces: cycle {force['cycle_id']} | {scope} | {force['observed_atoms']} atoms")
+        if force['max_norm_ry_bohr'] is not None:
+            atoms = ', '.join(str(i) for i in force['max_norm_atom_ids'])
+            print(f"Largest atomic force norm: {force['max_norm_ry_bohr']:.10g} Ry/Bohr | atom IDs: {atoms}")
+            print(f"Largest absolute force component: {force['max_abs_component_ry_bohr']:.10g} Ry/Bohr")
+        if report.get('current_cycle') and report['current_cycle']['cycle_id'] != force['cycle_id']:
+            print('These forces belong to an earlier electronic cycle.')
+    stress = report.get('last_stress_record')
+    if stress:
+        scope = 'complete tensor' if stress['complete'] else 'partial tensor'
+        print(f"Stress: cycle {stress['cycle_id']} | {scope}")
+        if stress['pressure_kbar'] is not None:
+            print(f"Printed pressure: {stress['pressure_kbar']:.10g} kbar | relaxation target not assessed")
+        if report.get('current_cycle') and report['current_cycle']['cycle_id'] != stress['cycle_id']:
+            print('This stress belongs to an earlier electronic cycle.')
     for cycle in report.get('cycle_records', {}).get('cycles', []):
         forces = cycle['forces'] or {}
         stress = cycle['stress'] or {}

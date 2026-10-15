@@ -63,6 +63,30 @@ def cycle_summary(cycle):
         'pressure_kbar': stress['pressure_kbar'] if stress else None}
 
 
+def force_summary(cycle):
+    if cycle is None:
+        return None
+    import math
+    block = cycle['forces']
+    maximum = block['max_norm_ry_bohr']
+    return {'cycle_id': cycle['cycle_id'], 'source_line': block['source_line'],
+            'complete': block['complete'], 'expected_atoms': block['expected_atoms'],
+            'observed_atoms': len(block['atoms']),
+            'max_norm_ry_bohr': maximum,
+            'max_abs_component_ry_bohr': block['max_abs_component_ry_bohr'],
+            'max_norm_atom_ids': [a['atom_id'] for a in block['atoms']
+                                  if math.sqrt(sum(v*v for v in a['vector_ry_bohr'])) == maximum],
+            'scope': 'all expected atoms' if block['complete'] else 'observed atoms only',
+            'geometry_source_line': (cycle['geometry_at_start'] or {}).get('source_line')}
+
+
+def stress_summary(cycle):
+    if cycle is None:
+        return None
+    return {'cycle_id': cycle['cycle_id'], **cycle['stress'],
+            'interpretation': 'Printed stress and pressure; target pressure and free cell degrees of freedom are not assessed.'}
+
+
 def analyze(path, input_path=None, include_cycles=False):
     path = Path(path)
     raw_bytes = path.read_bytes(); raw = raw_bytes.decode(errors='replace')
@@ -159,6 +183,8 @@ def analyze(path, input_path=None, include_cycles=False):
         'last_total_force_cycle_id': last_total_force['cycle_id'] if last_total_force else None,
         'exchange_convergence': cli.exchange_status(text) if program in (None, 'PWSCF') else 'NOT ASSESSED',
         'last_force_cycle_id': last_force['cycle_id'] if last_force else None,
+        'last_force_record': force_summary(last_force),
+        'last_stress_record': stress_summary(last_stress),
         'last_stress_cycle_id': last_stress['cycle_id'] if last_stress else None,
         'warnings': warnings, 'next_step': action,
         'provenance': {'output_sha256': hashlib.sha256(raw_bytes).hexdigest(), 'input': input_provenance,

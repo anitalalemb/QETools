@@ -240,6 +240,38 @@ class ReportsAndExchange(unittest.TestCase):
         self.assertIsNone(r['current_cycle']['electronic_outcome'])
         self.assertEqual(r['ended_electronic_cycles'], 0)
 
+    def test_force_summary_keeps_norm_component_and_total_distinct(self):
+        r = self.report(HEADER+CYCLE)
+        f = r['last_force_record']
+        self.assertEqual(f['max_norm_ry_bohr'], 0.005)
+        self.assertEqual(f['max_abs_component_ry_bohr'], 0.004)
+        self.assertEqual(f['max_norm_atom_ids'], [1])
+        self.assertEqual(r['last_total_force_ry_bohr'], 0.005385)
+        self.assertTrue(f['complete'])
+        self.assertEqual(r['last_stress_record']['pressure_kbar'], -2.0)
+        self.assertEqual(r['last_stress_record']['tensor_kbar'][1][1], -2.0)
+
+    def test_partial_forces_are_labeled_observed_only(self):
+        r = self.report(HEADER+CYCLE.replace('atom 2 type 1 force = 0.0 -0.002 0.0\n', ''))
+        f = r['last_force_record']
+        self.assertFalse(f['complete'])
+        self.assertEqual(f['scope'], 'observed atoms only')
+        self.assertEqual(f['observed_atoms'], 1)
+        self.assertEqual(f['expected_atoms'], 2)
+
+    def test_force_and_stress_display_identify_earlier_cycle(self):
+        from qetools.commands import show
+        r = self.report(HEADER+CYCLE+'Self-consistent Calculation\niteration # 1\n')
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            show(r)
+        self.assertIn('Largest atomic force norm: 0.005', out.getvalue())
+        self.assertIn('forces belong to an earlier', out.getvalue())
+        self.assertIn('stress belongs to an earlier', out.getvalue())
+        self.assertIsNone(r['current_cycle']['pressure_kbar'])
+        self.assertEqual(r['last_force_record']['cycle_id'], 1)
+        self.assertEqual(r['last_stress_record']['cycle_id'], 1)
+
     def test_hashes_and_schema_are_recorded(self):
         text=HEADER+CYCLE+'JOB DONE.\n'
         r=self.report(text)

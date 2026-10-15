@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from qetools.records import parse_cycles
+from qetools.reporting import force_summary, stress_summary
 
 
 def num(value):
@@ -95,8 +96,22 @@ def audit(path):
                 checks += 1
                 if cycle['forces'][key] != expected_value:
                     failures.append({'cycle':i, 'field':key})
+        if ref['forces']:
+            summary = force_summary(cycle)
+            expected_ids = [a['atom_id'] for a in ref['forces'] if math.sqrt(sum(v*v for v in a['vector'])) == norms]
+            for key, expected_value in [('max_norm_ry_bohr', norms), ('max_abs_component_ry_bohr', maxima),
+                                        ('max_norm_atom_ids', expected_ids), ('source_line', ref['force_source_line']),
+                                        ('cycle_id', i)]:
+                checks += 1
+                if summary[key] != expected_value:
+                    failures.append({'cycle': i, 'field': 'force_summary.'+key})
         if ref['stress_kbar'] is not None:
             stress_blocks += 1
+            summary = stress_summary(cycle)
+            for key, expected_value in [('tensor_kbar', ref['stress_kbar']), ('source_line', ref['stress_source_line']), ('cycle_id', i)]:
+                checks += 1
+                if summary[key] != expected_value:
+                    failures.append({'cycle': i, 'field': 'stress_summary.'+key})
     version = raw[raw.find('Program PWSCF'):].splitlines()[0].split()[2].removeprefix('v.')
     return {'file':str(path.resolve()), 'sha256':hashlib.sha256(data).hexdigest(), 'qe_version':version,
             'cycles':len(refs), 'force_blocks':force_blocks, 'stress_blocks':stress_blocks,
