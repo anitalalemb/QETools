@@ -2,115 +2,119 @@
 
 Short commands. Clear reports. Evidence from Quantum ESPRESSO.
 
-QETools helps you inspect calculation outputs, understand convergence, and compare runs.
-The goal is a reusable toolkit for workstations and clusters, with optional tools for moiré materials and defects.
+QETools reads calculation files, explains convergence, and compares runs.
+It works on workstations and clusters. No NERSC account or Slurm installation is required.
 
-**Status:** early development. Scientific validation is in progress.
-The code on `main` and the [draft upgrade](https://github.com/anitalalemb/QETools/pull/1) are different. Planned features are listed separately below.
+**This branch is a development candidate.** The [validation report](docs/VALIDATION.md)
+records what was checked and what still needs validation.
 
-The first audit found 8 failures in 19 targeted checks of the published code.
-The proposed fixes pass 38 automated tests. See the [validation report](https://github.com/anitalalemb/QETools/blob/improve-portable-reports/docs/VALIDATION.md) for evidence and remaining limits.
+## Install
 
-## Start here
-
-Python 3 is required. From the repository:
+Python 3.9 or newer is required:
 
 ```sh
 git clone https://github.com/anitalalemb/QETools.git
 cd QETools
-
-python3 -m qetools.cli scf scf.out
-python3 -m qetools.cli relax relax.out
-python3 -m qetools.cli history .
-python3 -m qetools.cli check .
-python3 -m qetools.cli compare A.out B.out
+git switch improve-portable-reports
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install .
 ```
 
-These commands read existing files. They do not submit calculations.
-The current `main` has an empty `pyproject.toml`. Installation through pip is being repaired in the draft upgrade.
-For now, use the module commands above from the repository. They preserve all arguments.
+Installed commands work from any directory in the activated environment.
+On Windows, activate with `.venv\Scripts\Activate.ps1`.
+The toolkit has no third-party runtime dependencies.
 
-## Available analysis
+## Choose an analysis
 
-| Command | What it reports |
+| Command | Purpose |
 | --- | --- |
-| `qescf` | Electronic convergence, residuals, energies, warnings and timing |
-| `qerelax` | Electronic cycles, BFGS relaxation evidence, energies and forces |
-| `qehistory` / `qehis` | Attempts and restarts in chronological order |
-| `qecheck` | Input, path, pseudopotential, restart-file and launch-script checks |
-| `qecompare` | Settings, status and numerical differences between two outputs |
+| `qescf FILE` | SCF completion, convergence, energy and accuracy estimate |
+| `qerelax FILE` | Electronic and ionic/BFGS convergence, energy and total force |
+| `qehis DIRECTORY` | Attempts and restarts in chronological order |
+| `qecheck INPUT.in` | Input, path, pseudopotential and restart-file checks |
+| `qecompare A.out B.out` | Settings and numerical differences between two outputs |
 
-The included `bin/` shortcuts are optional. Some older shortcuts forward only the first argument.
-Use `python3 -m qetools.cli COMMAND ...` when supplying a directory or several options.
+`qehis` is the recommended short command; `qehistory` remains an equivalent alias. The same commands are available through
+`qetools scf`, `qetools relax`, `qetools history`, `qetools check` and `qetools compare`.
+Use `--help` for options.
 
-## Which SCF file is selected?
+## Understand qescf selection
 
-| Form | Selection |
+| Form | What happens |
 | --- | --- |
-| `qescf FILE.out` | Exactly that file |
-| `qescf .` | Newest detected SCF output, by file modification time |
-| `qescf -l` | List detected SCF outputs |
-| `qescf --best` | Prefer a converged candidate, then rank by residual |
+| `qescf FILE.out` | Analyze exactly that file |
+| `qescf .` | Select the newest matching SCF output by modification time |
+| `qescf -l` | Report all matching SCF outputs |
+| `qescf --best` | Prefer completed, converged outputs; rank by final SCF accuracy estimate |
 
-The default and `--best` can select the same file.
-“Newest” means the file timestamp. It does not prove that the file is the final calculation.
-
-**Current main:** `--best` uses the smallest residual anywhere in each run.
-**Draft upgrade:** it uses the final residual and requires completion evidence.
-Neither ranking proves that different structures or numerical settings are physically comparable.
-If no candidate converged, a selected file remains unconverged.
-
-Use the full module forms to keep every argument:
-
-```sh
-python3 -m qetools.cli scf --list DIRECTORY
-python3 -m qetools.cli scf --best DIRECTORY
-```
+Timestamp ties use filename order. `--best` uses modification time, then filename,
+to break equal accuracy estimates. If no candidate converged, the report says so.
+Default and `--best` may select the same file. A ranking does not prove physical comparability.
 
 ## Examples
-
-The original command examples remain useful:
 
 ```sh
 qescf .
 qescf scf_theta16m7_b0005_smearing_plain_4node.out
+qescf DIRECTORY --best
+qescf scf.out --verbose
+qescf scf.out --json
+qescf scf.out --input scf.in
 qerelax relax.out
-qehistory .
+qerelax relax.out --input relax.in --steps --json
+qetools inspect calculation.out --input calculation.in --json
+qehis .
 qecheck .
+qecheck . --verbose
 qecompare A.out B.out
 ```
 
-## What the result means
+SCF and relaxation reports are concise by default. `--verbose` shows detailed evidence.
+`--json` exports the same parsed values, units and selection reason. `--list --json` returns an array.
+Directory discovery reads `.out`, `.log` and `.stdout` files without recursion.
+Use `--input` to declare an exact input/output association and check the requested SCF target.
+Use `--steps` for cycle records with geometry, forces, stress and source lines.
+See the [cycle report guide](docs/CYCLE_REPORTS.md) for meanings and limits.
 
-Execution, electronic convergence and ionic convergence are separate checks.
-`JOB DONE.` alone does not establish convergence.
-A converged electronic cycle inside a relaxation does not prove that the structure finished relaxing.
+To use the source without installing, run `python3 -m qetools.cli COMMAND ...` from this repository.
 
-A raw energy difference is a numerical comparison.
-Its physical meaning also depends on the structures, pseudopotentials, Hamiltonian and numerical setup.
-Missing evidence should be reported as unknown.
+## Interpret the result
 
-The current checker contains Slurm and module assumptions. General launch support is being developed.
-Restart-file presence does not prove that a restart is usable.
-Calculation classification and input/output matching still need broader validation.
+Execution, electronic convergence and ionic convergence are separate.
+`JOB DONE.` alone does not establish convergence. Ending BFGS alone does not prove successful optimization.
+Appended output files are analyzed using the latest PWSCF run.
 
-## Next work
+The SCF accuracy is QE's printed estimate. It is not a separate measurement of the true energy error.
+A total-force diagnostic is not the optimizer's component-wise force criterion.
+A raw energy difference requires a consistent physical setup before interpretation.
 
-1. Validate the existing commands against raw QE outputs and independent expected results.
-2. Repair installation and option forwarding. Make reports concise and portable.
-3. Validate forces, stress, `relax` and `vc-relax`, including different optimizers and constraints.
-4. Automate atom displacements, cell changes, bond changes and layer analysis.
-5. Add NSCF, bands and DOS/PDOS analysis.
-6. Add spin, magnetization, Hubbard and phonon analysis.
-7. Add general bilayer τ generation, batch scans and moiré-specific analysis.
-8. Combine validated modules into `qeall`.
+The checked scope is SCF and BFGS relaxation in the available STO corpus (QE 7.3.1 and 7.5). Input matching and restart checks are heuristic.
+Relative paths assume the input directory was the launch directory. Restart-file presence does not prove usability.
+FIRE/damped methods, variable-cell stress/geometry, magnetic/Hubbard cases and phonons need dedicated validation.
 
-These are planned capabilities, not released commands.
-Older wrappers such as `qexy`, `qez`, `qepdos` and `qeall` are placeholders.
+## Roadmap and development
 
-## Project plan
+See the [roadmap](docs/ROADMAP.md) and the [Notion task tracker](https://app.notion.com/p/3f968ec96206815a8f1dd92d2faeb319).
+Bands, PDOS, structural/τ tools and `qeall` are planned. Their older wrappers are placeholders.
 
-[Tasks, ideas and examples in Notion](https://app.notion.com/p/3c368ec9620681d9b3bae2dce4ce9ae3)
+```sh
+python3 -m unittest discover -s tests -v
+```
 
-Development follows the [QE input reference](https://www.quantum-espresso.org/Doc/INPUT_PW.html).
-Validation must record the toolkit commit, QE version, input files, output evidence and expected values.
+History can also use a declared input and export evidence:
+
+```sh
+qehis calculation.out --input calculation.in
+qehis . --json
+```
+
+See [history columns and validation](docs/HISTORY.md) for cycle meanings and limits.
+
+For a first view of atomic motion in a relaxation:
+
+```sh
+qetools structure relax.out
+```
+
+See [structural comparison assumptions and examples](docs/STRUCTURE.md).

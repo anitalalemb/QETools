@@ -1,8 +1,9 @@
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 import sys
 import math
+import os
 
 FLOAT = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?"
 
@@ -11,8 +12,13 @@ FLOAT = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[EeDd][-+]?\d+)?"
 # BASIC HELPERS
 # ============================================================
 
+def latest_run(text):
+    from qetools.records import latest_run as scope
+    return scope(text)[0]
+
+
 def read(path):
-    return Path(path).read_text(errors="ignore")
+    return latest_run(Path(path).read_text(errors="replace"))
 
 
 def dfloat(x):
@@ -95,73 +101,12 @@ def trend(vals):
 # ============================================================
 
 def parse_qe_input_settings(text):
-    """
-    Parse common Quantum ESPRESSO input variables.
-
-    Handles:
-      key = 'quoted/string/value'
-      key = "quoted/string/value"
-      key = unquoted_value
-
-    In particular, absolute paths such as
-    /pscratch/... are preserved rather than being truncated at '/'.
-    """
-
-    keys = [
-        "calculation",
-        "restart_mode",
-        "prefix",
-        "outdir",
-        "pseudo_dir",
-        "nat",
-        "ntyp",
-        "nbnd",
-        "occupations",
-        "smearing",
-        "degauss",
-        "conv_thr",
-        "etot_conv_thr",
-        "forc_conv_thr",
-        "electron_maxstep",
-        "diagonalization",
-        "mixing_beta",
-        "mixing_mode",
-        "startingwfc",
-        "startingpot",
-        "max_seconds",
-        "ecutwfc",
-        "ecutrho",
-    ]
-
-    out = {}
-
-    for key in keys:
-        pattern = (
-            rf"(?im)^\s*{re.escape(key)}\s*=\s*"
-            rf"(?:'([^']*)'|\"([^\"]*)\"|([^,\n/]+))"
-        )
-
-        m = re.search(pattern, text)
-
-        if not m:
-            continue
-
-        value = next(
-            (
-                g
-                for g in m.groups()
-                if g is not None
-            ),
-            None,
-        )
-
-        if value is not None:
-            out[key] = value.strip()
-
-    return out
+    from qetools.inputs import scalar_settings
+    return scalar_settings(text)
 
 
 def output_core(text):
+    text = latest_run(text)
     iters = []
     acc = []
     energies = []
@@ -202,13 +147,12 @@ def output_core(text):
         if m:
             energies.append(dfloat(m.group(1)))
 
-        m = re.search(
-            r"negative rho.*?:\s*(" + FLOAT + r")",
-            line,
-            re.I,
-        )
+        m = re.search(r"negative rho.*?:\s*(.*)", line, re.I)
         if m:
-            neg.append(abs(dfloat(m.group(1))))
+            # Keep one magnitude per diagnostic line, including both spin channels.
+            channels = [abs(dfloat(value)) for value in re.findall(FLOAT, m.group(1))]
+            if channels:
+                neg.append(max(channels))
 
         m = re.search(
             r"Total force\s*=\s*(" + FLOAT + r")",
@@ -232,104 +176,13 @@ def output_core(text):
 # ============================================================
 
 def classify_output(path, text=None):
-    """
-    Classify a Quantum ESPRESSO output using physical/output evidence first.
-
-    Priority:
-      1. Explicit relaxation / variable-cell evidence in QE output
-      2. Strong NSCF / bands filename evidence
-      3. Conservative relaxation filename fallback
-      4. Standard PWSCF SCF evidence
-      5. UNKNOWN
-
-    Parent-directory names are never used for classification.
-    Generic words such as "relaxed" must not turn an SCF into RELAX.
-    """
-
-    p = Path(path)
-
+    from qetools.calculations import identify
     if text is None:
         try:
-            text = read(p)
-        except Exception:
+            text = read(path)
+        except OSError:
             return "UNKNOWN"
-
-    name = p.name.lower()
-    low = text.lower()
-
-    # --------------------------------------------------------
-    # Strong QE relaxation evidence
-    # --------------------------------------------------------
-
-    has_bfgs = (
-        "bfgs geometry optimization" in low
-        or "end of bfgs geometry optimization" in low
-        or "number of bfgs steps" in low
-        or "bfgs converged" in low
-    )
-
-    if has_bfgs:
-        has_vc_evidence = (
-            "variable cell" in low
-            or (
-                "cell_parameters" in low
-                and "new unit-cell volume" in low
-            )
-        )
-
-        if has_vc_evidence:
-            return "VC-RELAX"
-
-        return "RELAX"
-
-    # --------------------------------------------------------
-    # Explicit NSCF / bands filename evidence
-    # --------------------------------------------------------
-
-    if re.search(r"(^|[_\-.])nscf([_\-.]|$)", name):
-        return "NSCF"
-
-    if (
-        re.search(r"(^|[_\-.])bands?([_\-.]|$)", name)
-        or name.startswith("bands")
-    ):
-        return "BANDS"
-
-    # --------------------------------------------------------
-    # Conservative relaxation filename fallback
-    # --------------------------------------------------------
-    # Some truncated/early relaxation outputs may contain normal PWSCF
-    # electronic iterations but never reach the BFGS markers. In those
-    # cases use only explicit calculation-style relaxation tokens.
-    #
-    # Do NOT match generic words such as "relaxed", "pre_relaxed",
-    # "post_relaxed", etc.
-
-    if (
-        re.search(r"(^|[_\-.])relax([_\-.]|$)", name)
-        or re.search(r"(^|[_\-.])vc-relax([_\-.]|$)", name)
-        or re.search(r"(^|[_\-.])rx([_\-.]|$)", name)
-    ):
-        if "vc-relax" in name:
-            return "VC-RELAX"
-
-        return "RELAX"
-
-    # --------------------------------------------------------
-    # Standard electronic PWSCF evidence
-    # --------------------------------------------------------
-
-    if (
-        "program pwscf" in low
-        and (
-            "estimated scf accuracy" in low
-            or "convergence has been achieved" in low
-            or "number of kohn-sham states" in low
-        )
-    ):
-        return "SCF"
-
-    return "UNKNOWN"
+    return identify(path, latest_run(text))["calculation"]
 
 
 def is_qe_output(path):
@@ -340,6 +193,7 @@ def is_qe_output(path):
 
     return (
         "Program PWSCF" in text
+        or re.search(r"(?im)^\s*Program\s+(?:PHONON|PROJWFC|BANDS|DOS|HP|Q2R|MATDYN)\b", text)
         or "estimated scf accuracy" in text
         or "BFGS Geometry Optimization" in text
         or "JOB DONE." in text
@@ -352,13 +206,14 @@ def is_qe_output(path):
 # ============================================================
 
 def termination_flags(text):
+    text = latest_run(text)
     return {
         "jobdone": "JOB DONE." in text,
         "wall_stop": bool(
             re.search(r"Maximum CPU time exceeded", text, re.I)
         ),
         "stopped": bool(
-            re.search(r"Calculation stopped", text, re.I)
+            re.search(r"Calculation(?: \(EXX\))? stopped", text, re.I)
         ),
         "notconv": bool(
             re.search(r"convergence NOT achieved", text, re.I)
@@ -382,6 +237,7 @@ def latest_electronic_status(text):
     an ionic relaxation can stop at wall time even if previous electronic
     SCF cycles converged.
     """
+    text = latest_run(text)
 
     pos_conv = last_position(
         text,
@@ -427,6 +283,7 @@ def relaxation_electronic_detail(text):
     Separate completed electronic SCF cycles from a possibly unfinished
     current SCF cycle at the end of a relaxation output.
     """
+    text = latest_run(text)
 
     conv_matches = list(re.finditer(
         r"convergence has been achieved in\s+(\d+)\s+iterations",
@@ -487,18 +344,12 @@ def relaxation_electronic_detail(text):
     }
 
 def ionic_status(text, calc_type):
+    text = latest_run(text)
     if calc_type not in ("RELAX", "VC-RELAX"):
         return "N/A"
 
     if re.search(
         r"bfgs converged",
-        text,
-        re.I,
-    ):
-        return "CONVERGED"
-
-    if re.search(
-        r"End of BFGS Geometry Optimization",
         text,
         re.I,
     ):
@@ -514,17 +365,33 @@ def ionic_status(text, calc_type):
     return "UNPROVEN"
 
 
+def exchange_status(text):
+    text = latest_run(text)
+    if not re.search(r"Calculation \(EXX\)|EXX self-consistency|EXX convergence|Fock energy \(", text, re.I):
+        return "N/A"
+    reached = last_position(text, r"EXX self-consistency reached")
+    failed = last_position(text, r"EXX convergence NOT achieved|Calculation \(EXX\) stopped")
+    if failed > reached:
+        return "NOT CONVERGED"
+    return "CONVERGED" if reached >= 0 else "UNPROVEN"
+
+
 def summary_status(text, calc_type):
+    text = latest_run(text)
     flags = termination_flags(text)
     electronic = latest_electronic_status(text)
+    exchange = exchange_status(text)
 
     if flags["error"]:
         return "ERROR"
 
+    if exchange not in ("N/A", "CONVERGED"):
+        return "EXX NOT CONV" if exchange == "NOT CONVERGED" else "EXX UNPROVEN"
+
     if calc_type in ("RELAX", "VC-RELAX"):
         ion = ionic_status(text, calc_type)
 
-        if ion == "CONVERGED":
+        if ion == "CONVERGED" and electronic == "CONVERGED" and flags["jobdone"] and not (flags["wall_stop"] or flags["stopped"]):
             return "RELAX CONV"
 
         if ion == "STOPPED / INCOMPLETE":
@@ -535,7 +402,7 @@ def summary_status(text, calc_type):
         return "RELAX ?"
 
     if calc_type == "SCF":
-        if electronic == "CONVERGED" and not (
+        if electronic == "CONVERGED" and flags["jobdone"] and not (
             flags["wall_stop"]
             or flags["stopped"]
             or flags["notconv"]
@@ -571,14 +438,15 @@ def discover_outputs(path="."):
 
     files = []
 
-    for f in p.glob("*.out"):
+    for f in p.iterdir():
+        if f.suffix.lower() not in (".out", ".log", ".stdout"):
+            continue
         if f.is_file() and is_qe_output(f):
             files.append(f)
 
     return sorted(
         files,
-        key=lambda x: x.stat().st_mtime,
-        reverse=True,
+        key=lambda x: (-x.stat().st_mtime, str(x)),
     )
 
 
@@ -625,7 +493,7 @@ def select_scf_file(path=".", mode="latest"):
 
             conv = summary_status(text, "SCF") == "CONVERGED"
 
-            best = min(c["acc"]) if c["acc"] else float("inf")
+            best = c["acc"][-1] if c["acc"] else float("inf")
 
             # Converged calculations first,
             # then lowest residual,
@@ -644,6 +512,7 @@ def select_scf_file(path=".", mode="latest"):
                 x[0],
                 x[1],
                 x[2],
+                str(x[3]),
             )
         )
 
@@ -667,7 +536,7 @@ def list_scf_candidates(path="."):
 
     print(
         f"{'#':<4}"
-        f"{'DATE':<18}"
+        f"{'MODIFIED UTC':<21}"
         f"{'STATUS':<14}"
         f"{'BEST':<13}"
         f"{'LAST':<13}"
@@ -756,7 +625,7 @@ Explicit file:
     calc_type = classify_output(p, text)
 
     print("=" * 90)
-    print("QESCF — RESEARCH-GRADE QUANTUM ESPRESSO SCF ANALYZER v0.3")
+    print("QESCF — QUANTUM ESPRESSO SCF ANALYSIS")
     print("=" * 90)
     print(f"File                        : {p.resolve()}")
     print(f"Calculation classification  : {calc_type}")
@@ -1120,14 +989,14 @@ Explicit file:
 
     if charge_wrong:
         status_line(
-            "Charge consistency",
+            "Charge-error messages",
             "WARNING",
             "QE reported 'charge is wrong'",
         )
     else:
         status_line(
-            "Charge consistency",
-            "PASS",
+            "Charge-error messages",
+            "NONE FOUND",
         )
 
     # --------------------------------------------------------
@@ -1185,7 +1054,7 @@ Explicit file:
     )
 
     print(
-        "  qehistory         # inspect all QE outputs in this folder"
+        "  qehis         # inspect all QE outputs in this folder"
     )
 
     print(
@@ -1453,7 +1322,7 @@ Explicit file:
         if r["qe_error"]:
             return "ERROR"
 
-        if r["bfgs_conv"] or r["end_bfgs"]:
+        if r["bfgs_conv"] and r["job_done"] and not (r["wall_stop"] or r["stopped"]) and latest_electronic_status(text) == "CONVERGED" and exchange_status(text) in ("N/A", "CONVERGED"):
             return "CONVERGED"
 
         if r["wall_stop"] or r["stopped"]:
@@ -1493,7 +1362,7 @@ Explicit file:
 
         candidates = sorted(
             candidates,
-            key=lambda x: x.stat().st_mtime,
+            key=lambda x: (x.stat().st_mtime, str(x)),
             reverse=True
         )
 
@@ -1514,7 +1383,7 @@ Explicit file:
 
         print(
             f"{'#':<4}"
-            f"{'DATE':<18}"
+            f"{'MODIFIED UTC':<21}"
             f"{'TYPE':<10}"
             f"{'IONIC':<12}"
             f"{'FINAL FORCE':<15}"
@@ -1679,8 +1548,8 @@ Explicit file:
 
     print("=" * 94)
     print(
-        "QERELAX — RESEARCH-GRADE QUANTUM ESPRESSO "
-        "RELAXATION ANALYZER v0.4"
+        "QERELAX — QUANTUM ESPRESSO "
+        "RELAXATION ANALYSIS"
     )
     print("=" * 94)
 
@@ -2100,7 +1969,9 @@ Explicit file:
         "FAIL"
         if r["qe_error"]
         else (
-            "PASS"
+            "STOPPED"
+            if r["wall_stop"] or r["stopped"]
+            else "PASS"
             if r["job_done"]
             else "UNKNOWN"
         )
@@ -2239,7 +2110,7 @@ Explicit file:
     )
 
     print(
-        "  qehistory         # full SCF + relaxation history"
+        "  qehis         # full SCF + relaxation history"
     )
 
     print(
@@ -2257,15 +2128,15 @@ Explicit file:
 # QEHISTORY
 # ============================================================
 
-def history(path=None):
+def history(path=None, input_path=None):
     """
     Research-grade chronological Quantum ESPRESSO calculation history.
 
     Usage:
-        qehistory
-        qehistory DIRECTORY
-        qehistory FILE.out
-        qehistory --help
+        qehis
+        qehis DIRECTORY
+        qehis FILE.out
+        qehis --help
 
     The history view distinguishes:
       - SCF versus structural-relaxation calculations
@@ -2283,10 +2154,10 @@ def history(path=None):
         if args[0] in ("-h", "--help"):
             print("""
 Usage:
-  qehistory
-  qehistory DIRECTORY
-  qehistory FILE.out
-  qehistory --help
+  qehis
+  qehis DIRECTORY
+  qehis FILE.out
+  qehis --help
 
 Purpose:
   Show Quantum ESPRESSO calculation history chronologically.
@@ -2314,8 +2185,7 @@ The summary identifies:
 
     print("=" * 154)
     print(
-        "QEHISTORY — RESEARCH-GRADE QUANTUM ESPRESSO "
-        "CALCULATION HISTORY v0.7"
+        "QE CALCULATION HISTORY"
     )
     print("=" * 154)
 
@@ -2328,91 +2198,18 @@ The summary identifies:
     # Chronological ordering is most useful for restart chains.
     files = sorted(
         files,
-        key=lambda x: x.stat().st_mtime,
+        key=lambda x: (x.stat().st_mtime, str(x)),
     )
 
-    def history_relax_status(text0, calc_type):
-        """
-        More explicit relaxation status for history display.
-
-        This intentionally distinguishes an unterminated file from a
-        calculation that QE explicitly stopped.
-        """
-
-        flags = termination_flags(text0)
-
-        if flags["error"]:
-            return "ERROR"
-
-        ion = ionic_status(
-            text0,
-            calc_type,
-        )
-
-        if ion == "CONVERGED":
-            return "RELAX CONV"
-
-        if ion == "STOPPED / INCOMPLETE":
-            return "RELAX STOP"
-
-        # No convergence and no explicit stop/error.
-        core0 = output_core(text0)
-
-        if (
-            core0.get("energies")
-            or core0.get("forces")
-            or core0.get("iters")
-        ):
-            if not flags["jobdone"]:
-                return "UNTERMINATED"
-
-        if flags["jobdone"]:
-            return "RELAX INCOMP"
-
-        return "UNKNOWN"
-
-    def electronic_history_status(text0, calc_type):
-        """
-        For relaxation histories, show the state of the latest completed
-        electronic SCF separately from a possibly unfinished current cycle.
-        """
-
-        if calc_type in ("RELAX", "VC-RELAX"):
-            detail = relaxation_electronic_detail(
-                text0
-            )
-
-            return (
-                detail["last_completed_status"],
-                detail["current_status"],
-                detail["n_converged"],
-            )
-
-        status = latest_electronic_status(
-            text0
-        )
-
-        nconv = len(
-            re.findall(
-                r"convergence has been achieved in\s+\d+\s+iterations",
-                text0,
-                re.I,
-            )
-        )
-
-        return (
-            status,
-            status,
-            nconv,
-        )
-
     print(
-        f"{'DATE':<18}"
+        f"{'MODIFIED UTC':<21}"
         f"{'TYPE':<10}"
-        f"{'BEST SCF':<13}"
-        f"{'LAST SCF':<13}"
-        f"{'LAST DONE':<13}"
-        f"{'CURRENT':<13}"
+        f"{'MIN EST (Ry)':<13}"
+        f"{'LAST EST (Ry)':<14}"
+        f"{'EST CYCLE':<10}"
+        f"{'LATEST EST':<13}"
+        f"{'LAST ENDED':<15}"
+        f"{'LATEST CYCLE':<15}"
         f"{'OVERALL':<15}"
         f"FILE"
     )
@@ -2422,47 +2219,20 @@ The summary identifies:
     rows = []
 
     for f in files:
-        try:
-            text0 = read(f)
-        except Exception:
-            continue
-
-        typ = classify_output(
-            f,
-            text0,
-        )
-
-        core = output_core(
-            text0
-        )
-
-        best = (
-            min(core["acc"])
-            if core["acc"]
-            else None
-        )
-
-        last = (
-            core["acc"][-1]
-            if core["acc"]
-            else None
-        )
-
-        last_done, current, nconv = electronic_history_status(
-            text0,
-            typ,
-        )
-
-        if typ in ("RELAX", "VC-RELAX"):
-            overall = history_relax_status(
-                text0,
-                typ,
-            )
-        else:
-            overall = summary_status(
-                text0,
-                typ,
-            )
+        from qetools.history import build_record
+        record = build_record(f, input_path=input_path)
+        report = record["report"]
+        text0 = read(f)
+        identity = {"source": report["classification_source"], "warnings": report["warnings"]}
+        typ = report["calculation"]
+        details = record["history_evidence"] or {}
+        best = (details.get("minimum_estimate") or {}).get("value_ry")
+        last = (details.get("last_estimate") or {}).get("value_ry")
+        ended = details.get("last_ended_cycle")
+        last_done = ended["status"] if ended else "NONE" if record["history_evidence"] is not None else "N/A"
+        current = details.get("latest_cycle_status", "NOT ASSESSED")
+        nconv = details.get("converged_cycles", 0)
+        overall = record["history_status"]
 
         rows.append(
             {
@@ -2475,19 +2245,41 @@ The summary identifies:
                 "current": current,
                 "nconv": nconv,
                 "overall": overall,
+                "identity": identity,
             }
         )
 
         print(
-            f"{fmt_time(f):<18}"
+            f"{datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).strftime('%Y-%m-%d %H:%M:%S'):<21}"
             f"{typ:<10}"
             f"{fmt_float(best):<13}"
-            f"{fmt_float(last):<13}"
-            f"{last_done:<13}"
-            f"{current:<13}"
+            f"{fmt_float(last):<14}"
+            f"{str((details.get('last_estimate') or {}).get('cycle_id') or '—'):<10}"
+            f"{fmt_float((details.get('latest_cycle_estimate') or {}).get('value_ry')):<13}"
+            f"{last_done:<15}"
+            f"{current:<15}"
             f"{overall:<15}"
             f"{f.name}"
         )
+
+    uncertain = [r for r in rows if r["identity"]["warnings"]]
+    if uncertain:
+        print("\nTYPE EVIDENCE / LIMITS:")
+        for row in uncertain:
+            print(f"  {row['file'].name}: {row['identity']['source']}")
+            for warning in row["identity"]["warnings"]:
+                print(f"    {warning.replace('supply --input', 'inspect with --input').replace('Supply --input', 'Inspect with --input')}")
+    if input_path is not None:
+        print(f"\nInput association: {Path(input_path).resolve()} (declared by user; not independently proven)")
+    print("NOT ASSESSED: this history view does not validate this calculation type.")
+
+    print("\nMODIFIED UTC: file modification time; copying a file can change its order.")
+    print("MIN/LAST EST: minimum/last printed SCF accuracy estimate in the latest run, in Ry.")
+    print("EST CYCLE: cycle containing LAST EST; LATEST EST: latest cycle estimate, in Ry.")
+    print("LAST EST may belong to an earlier cycle; it is not necessarily the latest cycle's estimate.")
+    print("LAST ENDED: last cycle with a convergence outcome; NONE means no such outcome.")
+    print("LATEST CYCLE: last electronic cycle in the output; this does not establish a live process.")
+    print("— means no printed value. Electronic convergence does not prove ionic convergence.")
 
     # ========================================================
     # HISTORY SUMMARY
@@ -2557,28 +2349,29 @@ The summary identifies:
         best_scf = min(
             converged_scfs,
             key=lambda r: (
-                r["best"]
-                if r["best"] is not None
+                r["last"]
+                if r["last"] is not None
                 else float("inf"),
                 -r["file"].stat().st_mtime,
+                str(r["file"]),
             ),
         )
 
         print(
-            f"{'Best converged SCF':<32}: "
+            f"{'Selected converged SCF':<32}: "
             f"{best_scf['file'].name}"
         )
 
         print(
-            f"{'Best converged residual':<32}: "
-            f"{fmt_float(best_scf['best'])} Ry"
+            f"{'Selected final SCF accuracy':<32}: "
+            f"{fmt_float(best_scf['last'])} Ry"
         )
 
     else:
         best_scf = None
 
         print(
-            f"{'Best converged SCF':<32}: none detected"
+            f"{'Selected converged SCF':<32}: none detected"
         )
 
     if relax_rows:
@@ -3090,8 +2883,7 @@ Important:
             "bfgs_converged":
                 bool(
                     re.search(
-                        r"\bbfgs converged\b|"
-                        r"End of BFGS Geometry Optimization",
+                        r"\bbfgs converged\b",
                         text0,
                         re.I,
                     )
@@ -3116,8 +2908,8 @@ Important:
 
     print("=" * 112)
     print(
-        "QECOMPARE — RESEARCH-GRADE QUANTUM ESPRESSO "
-        "COMPARISON v0.6"
+        "QECOMPARE — QUANTUM ESPRESSO "
+        "COMPARISON"
     )
     print("=" * 112)
 
@@ -3972,7 +3764,7 @@ Important:
     print("\nUSEFUL NEXT COMMANDS")
     print(f"  qescf {pa}    # detailed A analysis if A is SCF-like")
     print(f"  qescf {pb}    # detailed B analysis if B is SCF-like")
-    print("  qehistory      # inspect chronology in the current directory")
+    print("  qehis      # inspect chronology in the current directory")
     print("  qecheck .      # inspect inputs/restarts/scripts")
     print("=" * 112)
 
@@ -4255,8 +4047,7 @@ Explicit input:
         directory outputs and verify metadata before claiming a match.
         """
         outs = [
-            f for f in input_file.parent.glob("*.out")
-            if f.is_file()
+            f for f in discover_outputs(input_file.parent)
         ]
 
         prefix = settings.get("prefix")
@@ -4288,9 +4079,8 @@ Explicit input:
                 if clean_value(prefix) in t:
                     score += 2
 
-            scored.append(
-                (score, f.stat().st_mtime, f, t)
-            )
+            if score >= 5:
+                scored.append((score, f.stat().st_mtime, f, t))
 
         scored.sort(
             key=lambda x: (x[0], x[1]),
@@ -4321,7 +4111,7 @@ Explicit input:
         srun_lines = [
             x.strip()
             for x in txt.splitlines()
-            if re.search(r"\bsrun\b.*\bpw\.x\b", x)
+            if not x.lstrip().startswith("#") and re.search(r"(?:^|[\s/])pw\.x(?:\s|$)", x)
         ]
 
         return {
@@ -4337,8 +4127,8 @@ Explicit input:
 
     def find_related_scripts(input_file):
         scripts = sorted(
-            f for f in input_file.parent.glob("*.sh")
-            if f.is_file()
+            f for f in input_file.parent.iterdir()
+            if f.is_file() and f.suffix.lower() in (".sh", ".slurm", ".sbatch", ".pbs")
         )
 
         exact = []
@@ -4360,8 +4150,8 @@ Explicit input:
 
     print("=" * 100)
     print(
-        "QECHECK — RESEARCH-GRADE QUANTUM ESPRESSO "
-        "INTEGRITY CHECKER v0.5"
+        "QECHECK — QUANTUM ESPRESSO "
+        "INPUT AND FILE CHECKS"
     )
     print("=" * 100)
 
@@ -4391,19 +4181,19 @@ Explicit input:
         print("=" * 100)
 
         calc = clean_value(
-            settings.get("calculation")
+            settings.get("calculation", "scf")
         )
 
         prefix = clean_value(
-            settings.get("prefix")
+            settings.get("prefix", "pwscf")
         )
 
         outdir_raw = clean_value(
-            settings.get("outdir")
+            settings.get("outdir", os.environ.get("ESPRESSO_TMPDIR", "./"))
         )
 
         pseudo_raw = clean_value(
-            settings.get("pseudo_dir")
+            settings.get("pseudo_dir", os.environ.get("ESPRESSO_PSEUDO", "./"))
         )
 
         nat_raw = clean_value(
@@ -4692,25 +4482,12 @@ Explicit input:
             )
 
         if occ and occ.lower() == "smearing":
-            if not smear:
-                local_warn.append(
-                    "occupations='smearing' but smearing type was not parsed"
-                )
-
             if not degauss:
                 local_warn.append(
                     "occupations='smearing' but degauss was not parsed"
                 )
 
-        for key in (
-            "ecutwfc",
-            "ecutrho",
-            "conv_thr",
-            "electron_maxstep",
-            "diagonalization",
-            "mixing_beta",
-            "mixing_mode",
-        ):
+        for key in ("ecutwfc",):
             if key not in settings:
                 local_warn.append(
                     f"{key} not explicitly parsed from input"
@@ -5194,7 +4971,7 @@ Explicit input:
         # SLURM / EXECUTION SCRIPT
         # ----------------------------------------------------
 
-        print("\nSLURM / LAUNCH SCRIPT")
+        print("\nOPTIONAL LAUNCH SCRIPT")
 
         related_scripts, all_scripts = find_related_scripts(
             inp
@@ -5212,9 +4989,7 @@ Explicit input:
             )
 
             if all_scripts:
-                local_warn.append(
-                    "no .sh script explicitly references this input file"
-                )
+                print("Launch validation: not assessed (no script explicitly references this input)")
 
                 if show_all:
                     print(
@@ -5225,9 +5000,7 @@ Explicit input:
                             f"  {sh.name}"
                         )
             else:
-                local_warn.append(
-                    "no Slurm/shell scripts found in calculation directory"
-                )
+                print("Launch validation: not assessed (no saved launch script; local runs are supported)")
 
         else:
             for sh in scripts_to_show:
@@ -5271,10 +5044,6 @@ Explicit input:
                             f"{'  module':<30}: {line}"
                         )
 
-                else:
-                    local_warn.append(
-                        f"{sh.name}: no module command found"
-                    )
 
                 if info["srun"]:
                     for line in info["srun"]:
@@ -5287,35 +5056,8 @@ Explicit input:
                     )
 
                 else:
-                    local_fail.append(
-                        f"{sh.name}: no srun ... pw.x launch found"
-                    )
-
-                has_reset = any(
-                    re.search(
-                        r"\bmodule\s+reset\b",
-                        x,
-                    )
-                    for x in info["modules"]
-                )
-
-                if not has_reset:
                     local_warn.append(
-                        f"{sh.name}: no 'module reset' before QE environment setup"
-                    )
-
-                qe_modules = [
-                    x for x in info["modules"]
-                    if "espresso" in x.lower()
-                ]
-
-                if qe_modules:
-                    local_pass.append(
-                        f"{sh.name} loads Quantum ESPRESSO module"
-                    )
-                else:
-                    local_warn.append(
-                        f"{sh.name}: no espresso module load detected"
+                        f"{sh.name}: no recognizable pw.x launch found (review manually)"
                     )
 
                 # Cross-check MPI ranks if values are plain integers.
@@ -5324,7 +5066,7 @@ Explicit input:
                     ntpn = int(info["ntasks_per_node"])
                     expected_ranks = nodes * ntpn
 
-                    if info["srun"]:
+                    if info["srun"] and re.search(r"\bsrun\b", info["srun"][0]):
                         launch = info["srun"][0]
 
                         m = re.search(
@@ -5506,7 +5248,7 @@ Explicit input:
         "  qerelax -l               # relaxation candidates/results"
     )
     print(
-        "  qehistory                # chronological QE calculation history"
+        "  qehis                # chronological QE calculation history"
     )
 
     print("=" * 100)
@@ -5516,7 +5258,7 @@ Explicit input:
 # QETOOLS MAIN
 # ============================================================
 
-def main():
+def legacy_main():
     if len(sys.argv) < 2:
         print(
             """
@@ -5553,7 +5295,7 @@ Usage:
 
     elif cmd == "history":
         old = sys.argv
-        sys.argv = ["qehistory"] + args
+        sys.argv = ["qehis"] + args
 
         try:
             history()
@@ -5584,6 +5326,11 @@ Usage:
         raise SystemExit(
             f"Unknown command: {cmd}"
         )
+
+
+def main():
+    from qetools.commands import main as run
+    return run()
 
 
 if __name__ == "__main__":

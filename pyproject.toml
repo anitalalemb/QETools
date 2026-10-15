@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qetools-anita"
+version = "0.3.0"
+description = "Portable, evidence-based Quantum ESPRESSO output analysis"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{name = "Anita Lal"}]
+
+[project.urls]
+Repository = "https://github.com/anitalalemb/QETools"
+
+[project.scripts]
+qetools = "qetools.commands:main"
+qescf = "qetools.commands:scf"
+qerelax = "qetools.commands:relax"
+qehistory = "qetools.commands:history"
+qehis = "qetools.commands:history"
+qecheck = "qetools.commands:check"
+qecompare = "qetools.commands:compare"
+
+[tool.setuptools.packages.find]
+include = ["qetools*"]
