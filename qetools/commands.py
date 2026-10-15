@@ -198,15 +198,40 @@ def check_command(argv):
     print('Next: use qecheck --verbose for paths, matches and evidence.')
 
 
+def structure_command(argv):
+    parser = argparse.ArgumentParser(prog='qetools structure', description='Compare explicit initial/final geometries with confirmed atom-index matching.')
+    parser.add_argument('reference', type=Path)
+    parser.add_argument('candidate', nargs='?', type=Path)
+    parser.add_argument('--from', dest='first', choices=('initial','final'), default='initial')
+    parser.add_argument('--to', dest='second', choices=('initial','final'), default='final')
+    parser.add_argument('--periodic', choices=('none','a','b','c','ab','ac','bc','abc'), default='none', help='lattice directions to wrap; requires an orthogonal cell')
+    parser.add_argument('--json', action='store_true')
+    args=parser.parse_args(argv)
+    from .structure import compare
+    report=compare(args.reference,args.candidate,args.first,args.second,
+                   tuple('abc'.index(c) for c in args.periodic) if args.periodic!='none' else ())
+    if args.json:
+        print(json.dumps(report,indent=2,allow_nan=False)); return
+    print('QE STRUCTURE DISPLACEMENTS')
+    print(f"Units: {report['units']} | matching: atom index + species | alignment: none")
+    print(f"Periodic lattice axes: {args.periodic}")
+    print(f"{'ATOM':<8}{'SPECIES':<12}{'DX':>14}{'DY':>14}{'DZ':>14}{'DISTANCE':>14}")
+    for row in report['atoms']:
+        print(f"{row['atom_id']:<8}{row['species']:<12}{row['dx']:>14.6g}{row['dy']:>14.6g}{row['dz']:>14.6g}{row['displacement']:>14.6g}")
+    print(f"Maximum displacement: {report['maximum_displacement']:.6g} {report['units']}")
+    print(f"RMS displacement: {report['rms_displacement']:.6g} {report['units']}")
+    for limit in report['limits']: print(f'Limit: {limit}')
+
+
 def main(argv=None):
     args = list(sys.argv[1:] if argv is None else argv)
     parser = argparse.ArgumentParser(prog='qetools', description='Quantum ESPRESSO output analysis on workstations and clusters.')
     parser.add_argument('--version', action='version', version=__version__)
-    parser.add_argument('command', choices=('scf', 'relax', 'inspect', 'history', 'compare', 'check'))
+    parser.add_argument('command', choices=('scf', 'relax', 'inspect', 'history', 'compare', 'check', 'structure'))
     if not args:
         parser.print_help()
         return
-    if args and args[0] in ('scf', 'relax', 'inspect', 'history', 'compare', 'check'):
+    if args and args[0] in ('scf', 'relax', 'inspect', 'history', 'compare', 'check', 'structure'):
         parsed = argparse.Namespace(command=args[0])
         rest = args[1:]
     else:
@@ -214,6 +239,8 @@ def main(argv=None):
     try:
         if parsed.command in ('scf', 'relax', 'inspect'):
             output_command(parsed.command, rest)
+        elif parsed.command == 'structure':
+            structure_command(rest)
         elif parsed.command == 'history':
             history_command(rest)
         elif parsed.command == 'check':

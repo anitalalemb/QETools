@@ -110,3 +110,11 @@ qehis . --json
 ```
 
 See [history columns and validation](docs/HISTORY.md) for cycle meanings and limits.
+
+For a first view of atomic motion in a relaxation:
+
+```sh
+qetools structure relax.out
+```
+
+See [structural comparison assumptions and examples](docs/STRUCTURE.md).
