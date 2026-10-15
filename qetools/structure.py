@@ -1,6 +1,6 @@
 """Explicit, index-matched geometry comparison from PWSCF output snapshots.
 
-This first version rejects cell changes and skew-cell periodic wrapping.
+Cell decomposition is explicit; periodic wrapping in skew cells is rejected.
 No atom assignment, rigid alignment or relaxed-structure certification is implied.
 """
 import hashlib
@@ -65,10 +65,30 @@ def snapshot(path, which):
             'atoms':geometry['atoms'], 'coordinates':coordinates}
 
 
-def compare(reference, candidate=None, first='initial', second='final', periodic=()):
+def determinant(m):
+    a,b,c=m
+    return sum(a[i]*(b[(i+1)%3]*c[(i+2)%3]-b[(i+2)%3]*c[(i+1)%3]) for i in range(3))
+
+
+def fractional(cartesian, cell):
+    # r = f A, using reciprocal row vectors; works for skew cells.
+    a,b,c=cell; volume=determinant(cell)
+    def cross(x,y):
+        return [x[1]*y[2]-x[2]*y[1], x[2]*y[0]-x[0]*y[2], x[0]*y[1]-x[1]*y[0]]
+    return [sum(r*v for r,v in zip(cartesian, vector))/volume for vector in (cross(b,c),cross(c,a),cross(a,b))]
+
+
+def compare(reference, candidate=None, first='initial', second='final', periodic=(), separate_cell=False):
     a = snapshot(reference, first); b = snapshot(candidate or reference, second)
-    if a['units'] != b['units'] or any(abs(x-y)>1e-9 for ra,rb in zip(a['cell'],b['cell']) for x,y in zip(ra,rb)):
-        raise ValueError('Cell changed or units differ; strain/internal-motion separation is not implemented')
+    if a['units'] != b['units']:
+        raise ValueError('Coordinate units differ; mixed-unit conversion is not implemented')
+    changed = any(abs(x-y)>1e-9 for ra,rb in zip(a['cell'],b['cell']) for x,y in zip(ra,rb))
+    if changed and not separate_cell:
+        raise ValueError('Cell changed; use --separate-cell for affine/internal-motion decomposition')
+    if separate_cell and periodic:
+        raise ValueError('Cell decomposition currently requires unwrapped coordinates; omit --periodic')
+    if determinant(a['cell'])*determinant(b['cell']) <= 0:
+        raise ValueError('Cell handedness changed; verify the structure correspondence')
     if len(a['atoms']) != len(b['atoms']) or any((x['atom_id'],x['species']) != (y['atom_id'],y['species']) for x,y in zip(a['atoms'],b['atoms'])):
         raise ValueError('Atom count, order or species differ; provide structures with confirmed index correspondence')
     cell = a['cell']
@@ -83,14 +103,29 @@ def compare(reference, candidate=None, first='initial', second='final', periodic
             # Deterministic half-cell convention: [-1/2, 1/2).
             shift=math.floor(fraction+0.5)
             delta=[d-shift*v for d,v in zip(delta,vector)]
-        rows.append({'atom_id':atom['atom_id'],'species':atom['species'],
-                     'dx':delta[0],'dy':delta[1],'dz':delta[2],
-                     'displacement':math.sqrt(sum(v*v for v in delta))})
-    return {'schema_version':'1.0','units':a['units'],'reference':a,'candidate':b,
+        row = {'atom_id':atom['atom_id'],'species':atom['species'],
+               'dx':delta[0],'dy':delta[1],'dz':delta[2],
+               'displacement':math.sqrt(sum(v*v for v in delta))}
+        if separate_cell:
+            f = fractional(start, a['cell'])
+            mapped = [sum(f[i]*b['cell'][i][j] for i in range(3)) for j in range(3)]
+            affine = [y-x for x,y in zip(start,mapped)]
+            internal = [y-x for x,y in zip(mapped,end)]
+            row.update(affine_displacement_vector=affine,
+                       internal_displacement_vector=internal,
+                       internal_displacement=math.sqrt(sum(v*v for v in internal)))
+        rows.append(row)
+    return {'schema_version':'1.1','units':a['units'],'reference':a,'candidate':b,
+            'cell_decomposition': ({'method':'reference fractional positions mapped through candidate cell',
+                'reference_volume':abs(determinant(a['cell'])), 'candidate_volume':abs(determinant(b['cell'])),
+                'volume_units':a['units']+'^3', 'volume_ratio':abs(determinant(b['cell'])/determinant(a['cell'])),
+                'maximum_internal_displacement':max(r['internal_displacement'] for r in rows),
+                'rms_internal_displacement':math.sqrt(sum(r['internal_displacement']**2 for r in rows)/len(rows))}
+                if separate_cell else None),
             'matching':'same atom index and species; user must confirm physical identity',
             'periodic_lattice_axes':list(periodic),'alignment':'none', 'atoms':rows,
             'maximum_displacement':max(r['displacement'] for r in rows),
             'rms_displacement':math.sqrt(sum(r['displacement']**2 for r in rows)/len(rows)),
-            'limits':['Cell must be unchanged. No rigid translation or rotation removed.',
+            'limits':['No rigid translation or rotation removed. Cell decomposition requires unwrapped coordinates.',
                       'An explicit final-coordinate block does not prove ionic convergence.',
                       'Periodic wrapping requires an orthogonal cell; axes refer to lattice vectors.']}

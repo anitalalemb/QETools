@@ -71,3 +71,28 @@ class StructureTests(unittest.TestCase):
             p=Path(tmp,'relax.out');p.write_text(TEXT);out=io.StringIO()
             with contextlib.redirect_stdout(out):main(['structure',str(p),'--periodic','a','--json'])
             self.assertAlmostEqual(json.loads(out.getvalue())['atoms'][0]['dx'],1)
+
+    def changed(self, final_atom='Si 0.95 0.2 0.3'):
+        return TEXT.replace('Begin final coordinates','Begin final coordinates\nCELL_PARAMETERS (angstrom)\n20 0 0\n0 10 0\n0 0 10').replace('Si 0.05 0.4 0.3', final_atom)
+
+    def test_pure_cell_expansion_has_no_internal_motion(self):
+        r=self.result(self.changed(),separate_cell=True)
+        self.assertAlmostEqual(r['atoms'][0]['dx'],9.5)
+        self.assertAlmostEqual(r['atoms'][0]['internal_displacement'],0)
+        self.assertAlmostEqual(r['cell_decomposition']['volume_ratio'],2)
+
+    def test_cell_and_internal_motion_reconstruct_total(self):
+        r=self.result(self.changed('Si 0.975 0.2 0.3'),separate_cell=True)
+        atom=r['atoms'][0]
+        self.assertAlmostEqual(atom['internal_displacement_vector'][0],0.5)
+        for k,key in enumerate(('dx','dy','dz')):
+            self.assertAlmostEqual(atom['affine_displacement_vector'][k]+atom['internal_displacement_vector'][k],atom[key])
+
+    def test_decomposition_in_skew_reference_cell(self):
+        text=self.changed().replace('0 10 0','2 10 0')
+        r=self.result(text,separate_cell=True)
+        self.assertAlmostEqual(r['atoms'][0]['internal_displacement'],0)
+
+    def test_periodic_decomposition_requires_explicit_unwrapped_data(self):
+        with self.assertRaisesRegex(ValueError,'unwrapped'):
+            self.result(self.changed(),separate_cell=True,periodic=(0,))

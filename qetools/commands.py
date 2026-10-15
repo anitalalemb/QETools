@@ -205,11 +205,12 @@ def structure_command(argv):
     parser.add_argument('--from', dest='first', choices=('initial','final'), default='initial')
     parser.add_argument('--to', dest='second', choices=('initial','final'), default='final')
     parser.add_argument('--periodic', choices=('none','a','b','c','ab','ac','bc','abc'), default='none', help='lattice directions to wrap; requires an orthogonal cell')
+    parser.add_argument('--separate-cell', action='store_true', help='separate affine cell motion from internal motion; requires unwrapped coordinates')
     parser.add_argument('--json', action='store_true')
     args=parser.parse_args(argv)
     from .structure import compare
     report=compare(args.reference,args.candidate,args.first,args.second,
-                   tuple('abc'.index(c) for c in args.periodic) if args.periodic!='none' else ())
+                   tuple('abc'.index(c) for c in args.periodic) if args.periodic!='none' else (), separate_cell=args.separate_cell)
     if args.json:
         print(json.dumps(report,indent=2,allow_nan=False)); return
     print('QE STRUCTURE DISPLACEMENTS')
@@ -220,6 +221,14 @@ def structure_command(argv):
         print(f"{row['atom_id']:<8}{row['species']:<12}{row['dx']:>14.6g}{row['dy']:>14.6g}{row['dz']:>14.6g}{row['displacement']:>14.6g}")
     print(f"Maximum displacement: {report['maximum_displacement']:.6g} {report['units']}")
     print(f"RMS displacement: {report['rms_displacement']:.6g} {report['units']}")
+    if report['cell_decomposition']:
+        print('Internal motion after mapping reference fractional positions through the candidate cell:')
+        print(f"{'ATOM':<8}{'INTERNAL DX':>14}{'INTERNAL DY':>14}{'INTERNAL DZ':>14}{'DISTANCE':>14}")
+        for row in report['atoms']:
+            x,y,z=row['internal_displacement_vector']
+            print(f"{row['atom_id']:<8}{x:>14.6g}{y:>14.6g}{z:>14.6g}{row['internal_displacement']:>14.6g}")
+        print(f"Cell volume ratio: {report['cell_decomposition']['volume_ratio']:.8g}")
+        print(f"Maximum internal displacement: {report['cell_decomposition']['maximum_internal_displacement']:.6g} {report['units']}")
     for limit in report['limits']: print(f'Limit: {limit}')
 
 
